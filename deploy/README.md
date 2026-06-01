@@ -205,6 +205,57 @@ docker compose up -d
 docker compose down -v
 ```
 
+### Private Registry Image Workflow
+
+This fork defaults Docker Compose to the private image:
+
+```text
+devtest.pointlife365.net:5180/slzr/sub2api:latest
+```
+
+For production, pin `SUB2API_IMAGE` in `deploy/.env` to an immutable tag:
+
+```bash
+SUB2API_IMAGE=devtest.pointlife365.net:5180/slzr/sub2api:product-zhanzi-20260602-8b09fe43
+```
+
+For local or test deployments, keep the default `latest` tag or set:
+
+```bash
+SUB2API_IMAGE=devtest.pointlife365.net:5180/slzr/sub2api:latest
+```
+
+Build and push both tags from the repository root:
+
+PowerShell:
+
+```powershell
+Set-Content -Path deploy/registry-password.txt -Value '<registry-password>' -NoNewline
+pwsh deploy/push_private_image.ps1
+```
+
+Bash:
+
+```bash
+echo '<registry-password>' > deploy/registry-password.txt
+bash deploy/push_private_image.sh
+```
+
+The script pushes:
+
+- `devtest.pointlife365.net:5180/slzr/sub2api:product-zhanzi-<yyyymmdd>-<git-sha>`
+- `devtest.pointlife365.net:5180/slzr/sub2api:latest`
+
+`deploy/registry-password.txt` is ignored by Git and must never be committed.
+
+To upgrade a production server, update `SUB2API_IMAGE` in `.env`, then run:
+
+```bash
+docker compose -f docker-compose.local.yml pull sub2api
+docker compose -f docker-compose.local.yml up -d sub2api
+docker compose -f docker-compose.local.yml logs -f sub2api
+```
+
 ### Environment Variables
 
 | Variable | Required | Default | Description |
