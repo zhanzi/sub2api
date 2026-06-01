@@ -120,5 +120,16 @@ func RegisterUserRoutes(
 			monitors.GET("", h.ChannelMonitor.List)
 			monitors.GET("/:id/status", h.ChannelMonitor.GetStatus)
 		}
+
+		images := authenticated.Group("/image-generation")
+		{
+			images.GET("/bootstrap", h.ImageGeneration.Bootstrap)
+			images.GET("/tasks", h.ImageGeneration.ListTasks)
+			images.GET("/tasks/:id", h.ImageGeneration.GetTask)
+			images.POST("/generations", h.ImageGeneration.Generate)
+			images.POST("/edits", h.ImageGeneration.Edit)
+			images.DELETE("/tasks/:id", h.ImageGeneration.DeleteTask)
+			images.GET("/files/:id", h.ImageGeneration.File)
+		}
 	}
 }

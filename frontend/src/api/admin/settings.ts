@@ -607,6 +607,11 @@ export interface SystemSettings {
   // Available Channels feature switch
   available_channels_enabled: boolean;
 
+  image_generation_enabled: boolean;
+  image_generation_default_group_id: number;
+  image_generation_default_model: string;
+  image_generation_retention_days: number;
+
   // Affiliate (邀请返利) feature switch
   affiliate_enabled: boolean;
 
@@ -836,6 +841,11 @@ export interface UpdateSettingsRequest {
 
   // Available Channels feature switch
   available_channels_enabled?: boolean;
+
+  image_generation_enabled?: boolean;
+  image_generation_default_group_id?: number;
+  image_generation_default_model?: string;
+  image_generation_retention_days?: number;
 
   // Affiliate (邀请返利) feature switch
   affiliate_enabled?: boolean;

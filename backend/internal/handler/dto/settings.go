@@ -241,6 +241,11 @@ type SystemSettings struct {
 	// Available Channels feature switch (user-facing aggregate view)
 	AvailableChannelsEnabled bool `json:"available_channels_enabled"`
 
+	ImageGenerationEnabled        bool   `json:"image_generation_enabled"`
+	ImageGenerationDefaultGroupID int64  `json:"image_generation_default_group_id"`
+	ImageGenerationDefaultModel   string `json:"image_generation_default_model"`
+	ImageGenerationRetentionDays  int    `json:"image_generation_retention_days"`
+
 	// 风控中心功能开关
 	RiskControlEnabled bool `json:"risk_control_enabled"`
 

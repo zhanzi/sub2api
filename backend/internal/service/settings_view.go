@@ -177,6 +177,11 @@ type SystemSettings struct {
 	// Available Channels feature (user-facing aggregate view)
 	AvailableChannelsEnabled bool `json:"available_channels_enabled"`
 
+	ImageGenerationEnabled        bool
+	ImageGenerationDefaultGroupID int64
+	ImageGenerationDefaultModel   string
+	ImageGenerationRetentionDays  int
+
 	// Claude Code version check
 	MinClaudeCodeVersion string
 	MaxClaudeCodeVersion string

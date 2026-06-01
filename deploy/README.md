@@ -249,6 +249,21 @@ Your entire deployment (configuration + data) is migrated!
 
 ---
 
+## Native Image Generation Storage
+
+The user-facing image generation page stores generated image files on the Sub2API server and stores only metadata in PostgreSQL.
+
+- Docker local-directory deployments store files under `deploy/data/image-generation/`.
+- Binary/systemd deployments store files under the application's runtime `data/image-generation/` directory.
+- The Admin UI setting **图片保存天数** controls each generated image's expiration time. The default is `30` days.
+- A background cleanup job scans expired image tasks daily, deletes local files, and marks expired records so users no longer see them in history.
+- Back up the image directory together with PostgreSQL if image history must survive server migration.
+- Plan disk capacity around expected image volume and retention days; shortening the retention setting only affects cleanup after the next scheduled cleanup run.
+
+After this native integration, `gpt_image_playground` and the `/image-playground/` Nginx reverse proxy are no longer required for the built-in image generation page.
+
+---
+
 ## Gemini OAuth Configuration
 
 Sub2API supports three methods to connect to Gemini:
