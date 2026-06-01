@@ -156,6 +156,20 @@ func ProvideUsageCleanupService(repo UsageCleanupRepository, timingWheel *Timing
 	return svc
 }
 
+func ProvideImageGenerationStorageConfig(cfg *config.Config) ImageGenerationStorageConfig {
+	baseDir := ""
+	if cfg != nil && cfg.Pricing.DataDir != "" {
+		baseDir = cfg.Pricing.DataDir + "/image-generation"
+	}
+	return ImageGenerationStorageConfig{BaseDir: baseDir, RetentionDays: 30}
+}
+
+func ProvideImageGenerationCleanupService(imageService *ImageGenerationService, timingWheel *TimingWheelService) *ImageGenerationCleanupService {
+	svc := NewImageGenerationCleanupService(imageService, timingWheel)
+	svc.Start()
+	return svc
+}
+
 // ProvideAccountExpiryService creates and starts AccountExpiryService.
 func ProvideAccountExpiryService(accountRepo AccountRepository) *AccountExpiryService {
 	svc := NewAccountExpiryService(accountRepo, time.Minute)
@@ -557,6 +571,9 @@ var ProviderSet = wire.NewSet(
 	ProvideTimingWheelService,
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,
+	ProvideImageGenerationStorageConfig,
+	NewImageGenerationService,
+	ProvideImageGenerationCleanupService,
 	ProvideDeferredService,
 	NewAntigravityQuotaFetcher,
 	NewUserAttributeService,

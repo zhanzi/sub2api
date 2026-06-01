@@ -362,6 +362,15 @@ const (
 	SettingKeyAvailableChannelsEnabled = "available_channels_enabled"
 
 	// =========================
+	// Native Image Generation
+	// =========================
+
+	SettingKeyImageGenerationEnabled        = "image_generation_enabled"
+	SettingKeyImageGenerationDefaultGroupID = "image_generation_default_group_id"
+	SettingKeyImageGenerationDefaultModel   = "image_generation_default_model"
+	SettingKeyImageGenerationRetentionDays  = "image_generation_retention_days"
+
+	// =========================
 	// Overload Cooldown (529)
 	// =========================
 

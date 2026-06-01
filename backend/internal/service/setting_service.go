@@ -759,6 +759,10 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyChannelMonitorEnabled,
 		SettingKeyChannelMonitorDefaultIntervalSeconds,
 		SettingKeyAvailableChannelsEnabled,
+		SettingKeyImageGenerationEnabled,
+		SettingKeyImageGenerationDefaultGroupID,
+		SettingKeyImageGenerationDefaultModel,
+		SettingKeyImageGenerationRetentionDays,
 		SettingKeyAffiliateEnabled,
 		SettingKeyRiskControlEnabled,
 	}
@@ -1873,6 +1877,18 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	// Available channels feature switch
 	updates[SettingKeyAvailableChannelsEnabled] = strconv.FormatBool(settings.AvailableChannelsEnabled)
 
+	updates[SettingKeyImageGenerationEnabled] = strconv.FormatBool(settings.ImageGenerationEnabled)
+	if settings.ImageGenerationDefaultGroupID > 0 {
+		updates[SettingKeyImageGenerationDefaultGroupID] = strconv.FormatInt(settings.ImageGenerationDefaultGroupID, 10)
+	} else {
+		updates[SettingKeyImageGenerationDefaultGroupID] = ""
+	}
+	updates[SettingKeyImageGenerationDefaultModel] = firstNonEmpty(settings.ImageGenerationDefaultModel, "gpt-image-2")
+	if settings.ImageGenerationRetentionDays <= 0 {
+		settings.ImageGenerationRetentionDays = 30
+	}
+	updates[SettingKeyImageGenerationRetentionDays] = strconv.Itoa(settings.ImageGenerationRetentionDays)
+
 	// Affiliate (邀请返利) feature switch
 	updates[SettingKeyAffiliateEnabled] = strconv.FormatBool(settings.AffiliateEnabled)
 
@@ -2795,6 +2811,12 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		// Available channels feature (default disabled; opt-in)
 		SettingKeyAvailableChannelsEnabled: "false",
 
+		// Native image generation page (default disabled; opt-in)
+		SettingKeyImageGenerationEnabled:        "false",
+		SettingKeyImageGenerationDefaultGroupID: "",
+		SettingKeyImageGenerationDefaultModel:   "gpt-image-2",
+		SettingKeyImageGenerationRetentionDays:  "30",
+
 		// Affiliate (邀请返利) feature (default disabled; opt-in)
 		SettingKeyAffiliateEnabled: "false",
 
@@ -3301,6 +3323,14 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 
 	// Available channels feature (default: disabled; strict true)
 	result.AvailableChannelsEnabled = settings[SettingKeyAvailableChannelsEnabled] == "true"
+
+	result.ImageGenerationEnabled = settings[SettingKeyImageGenerationEnabled] == "true"
+	result.ImageGenerationDefaultGroupID, _ = parseInt64Setting(settings[SettingKeyImageGenerationDefaultGroupID])
+	result.ImageGenerationDefaultModel = strings.TrimSpace(settings[SettingKeyImageGenerationDefaultModel])
+	if result.ImageGenerationDefaultModel == "" {
+		result.ImageGenerationDefaultModel = "gpt-image-2"
+	}
+	result.ImageGenerationRetentionDays = parsePositiveIntSetting(settings[SettingKeyImageGenerationRetentionDays], 30)
 
 	// Affiliate (邀请返利) feature (default: disabled; strict true)
 	result.AffiliateEnabled = settings[SettingKeyAffiliateEnabled] == "true"

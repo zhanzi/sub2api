@@ -5207,6 +5207,76 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">图片生成页面</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              控制用户侧原生图片生成页、默认 OpenAI 图片分组、模型和本地图片保存时长。
+            </p>
+            <p class="mt-1.5 text-xs">
+              <router-link
+                to="/admin/groups"
+                class="inline-flex items-center gap-1 text-primary-600 hover:underline dark:text-primary-400"
+              >
+                先在分组管理中确认 OpenAI 分组已允许图片生成
+                <span aria-hidden="true">→</span>
+              </router-link>
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">启用图片生成页</label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  禁用时用户访问图片生成页会看到配置提示，不会创建图片任务。
+                </p>
+              </div>
+              <Toggle v-model="form.image_generation_enabled" />
+            </div>
+
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div>
+                <label class="input-label">默认 OpenAI 图片分组</label>
+                <select
+                  v-model.number="form.image_generation_default_group_id"
+                  class="input"
+                >
+                  <option :value="0">请选择分组</option>
+                  <option
+                    v-for="group in imageGenerationGroups"
+                    :key="group.id"
+                    :value="group.id"
+                  >
+                    #{{ group.id }} · {{ group.name }}
+                  </option>
+                </select>
+                <p class="mt-1 text-xs text-gray-400">
+                  只显示 active、platform=openai 且已允许图片生成的分组。
+                </p>
+              </div>
+              <div>
+                <label class="input-label">默认模型</label>
+                <input
+                  v-model="form.image_generation_default_model"
+                  class="input"
+                  placeholder="gpt-image-2"
+                />
+              </div>
+              <div>
+                <label class="input-label">图片保存天数</label>
+                <input
+                  v-model.number="form.image_generation_retention_days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  class="input"
+                />
+                <p class="mt-1 text-xs text-gray-400">每天自动清理已过期本地图片。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
               {{ t('admin.settings.features.availableChannels.title') }}
             </h2>
@@ -6837,6 +6907,7 @@ const adminApiKeyMasked = ref("");
 const adminApiKeyOperating = ref(false);
 const newAdminApiKey = ref("");
 const subscriptionGroups = ref<AdminGroup[]>([]);
+const imageGenerationGroups = ref<AdminGroup[]>([]);
 
 // Overload Cooldown (529) 状态
 const overloadCooldownLoading = ref(true);
@@ -7188,6 +7259,10 @@ const form = reactive<SettingsForm>({
   channel_monitor_default_interval_seconds: 60,
   // Available Channels feature switch
   available_channels_enabled: false,
+  image_generation_enabled: false,
+  image_generation_default_group_id: 0,
+  image_generation_default_model: "gpt-image-2",
+  image_generation_retention_days: 30,
   // Affiliate (邀请返利) feature switch
   affiliate_enabled: false,
 });
@@ -7921,8 +7996,15 @@ async function loadSubscriptionGroups() {
       (group) =>
         group.subscription_type === "subscription" && group.status === "active",
     );
+    imageGenerationGroups.value = groups.filter(
+      (group) =>
+        group.platform === "openai" &&
+        group.status === "active" &&
+        group.allow_image_generation,
+    );
   } catch (_error: unknown) {
     subscriptionGroups.value = [];
+    imageGenerationGroups.value = [];
   }
 }
 
@@ -8329,6 +8411,13 @@ async function saveSettings() {
         Number(form.channel_monitor_default_interval_seconds) || 60,
       // Available Channels feature switch
       available_channels_enabled: form.available_channels_enabled,
+      image_generation_enabled: form.image_generation_enabled,
+      image_generation_default_group_id:
+        Number(form.image_generation_default_group_id) || 0,
+      image_generation_default_model:
+        String(form.image_generation_default_model || "gpt-image-2").trim(),
+      image_generation_retention_days:
+        Math.max(1, Number(form.image_generation_retention_days) || 30),
       // Affiliate (邀请返利) feature switch
       affiliate_enabled: form.affiliate_enabled,
     };

@@ -294,7 +294,11 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ChannelMonitorEnabled:                settings.ChannelMonitorEnabled,
 		ChannelMonitorDefaultIntervalSeconds: settings.ChannelMonitorDefaultIntervalSeconds,
 
-		AvailableChannelsEnabled: settings.AvailableChannelsEnabled,
+		AvailableChannelsEnabled:      settings.AvailableChannelsEnabled,
+		ImageGenerationEnabled:        settings.ImageGenerationEnabled,
+		ImageGenerationDefaultGroupID: settings.ImageGenerationDefaultGroupID,
+		ImageGenerationDefaultModel:   settings.ImageGenerationDefaultModel,
+		ImageGenerationRetentionDays:  settings.ImageGenerationRetentionDays,
 
 		AffiliateEnabled: settings.AffiliateEnabled,
 	}
@@ -637,6 +641,11 @@ type UpdateSettingsRequest struct {
 
 	// Available Channels feature switch (user-facing)
 	AvailableChannelsEnabled *bool `json:"available_channels_enabled"`
+
+	ImageGenerationEnabled        *bool   `json:"image_generation_enabled"`
+	ImageGenerationDefaultGroupID *int64  `json:"image_generation_default_group_id"`
+	ImageGenerationDefaultModel   *string `json:"image_generation_default_model"`
+	ImageGenerationRetentionDays  *int    `json:"image_generation_retention_days"`
 
 	// Affiliate (邀请返利) feature switch
 	AffiliateEnabled *bool `json:"affiliate_enabled"`
@@ -1747,6 +1756,30 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.AvailableChannelsEnabled
 		}(),
+		ImageGenerationEnabled: func() bool {
+			if req.ImageGenerationEnabled != nil {
+				return *req.ImageGenerationEnabled
+			}
+			return previousSettings.ImageGenerationEnabled
+		}(),
+		ImageGenerationDefaultGroupID: func() int64 {
+			if req.ImageGenerationDefaultGroupID != nil {
+				return *req.ImageGenerationDefaultGroupID
+			}
+			return previousSettings.ImageGenerationDefaultGroupID
+		}(),
+		ImageGenerationDefaultModel: func() string {
+			if req.ImageGenerationDefaultModel != nil {
+				return *req.ImageGenerationDefaultModel
+			}
+			return previousSettings.ImageGenerationDefaultModel
+		}(),
+		ImageGenerationRetentionDays: func() int {
+			if req.ImageGenerationRetentionDays != nil {
+				return *req.ImageGenerationRetentionDays
+			}
+			return previousSettings.ImageGenerationRetentionDays
+		}(),
 		AffiliateEnabled: func() bool {
 			if req.AffiliateEnabled != nil {
 				return *req.AffiliateEnabled
@@ -2076,7 +2109,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		ChannelMonitorEnabled:                updatedSettings.ChannelMonitorEnabled,
 		ChannelMonitorDefaultIntervalSeconds: updatedSettings.ChannelMonitorDefaultIntervalSeconds,
 
-		AvailableChannelsEnabled: updatedSettings.AvailableChannelsEnabled,
+		AvailableChannelsEnabled:      updatedSettings.AvailableChannelsEnabled,
+		ImageGenerationEnabled:        updatedSettings.ImageGenerationEnabled,
+		ImageGenerationDefaultGroupID: updatedSettings.ImageGenerationDefaultGroupID,
+		ImageGenerationDefaultModel:   updatedSettings.ImageGenerationDefaultModel,
+		ImageGenerationRetentionDays:  updatedSettings.ImageGenerationRetentionDays,
 
 		AffiliateEnabled: updatedSettings.AffiliateEnabled,
 
