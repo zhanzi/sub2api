@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "plan": {
+    "id": "20260601_121809_project_init",
+    "title": "项目初始化认知与开发基线",
+    "branch": "product/zhanzi"
+  },
+  "features": [
+    {
+      "id": "F001",
+      "title": "项目初始化认知",
+      "status": "completed",
+      "depends_on": [],
+      "acceptance": [
+        "明确当前 fork 的远端、分支职责和规则真源",
+        "明确项目定位、技术栈、后端入口、前端入口、CI 验证命令和迁移规则",
+        "识别 DEV_GUIDE.md 中与当前仓库事实不一致的内容"
+      ],
+      "verify": [
+        "git status --short --branch",
+        "git remote -v",
+        "读取 README_CN.md、backend/go.mod、frontend/package.json、.github/workflows/backend-ci.yml、backend/migrations/README.md"
+      ],
+      "passes": true,
+      "evidence": "已创建 context.md、plan.md、task_list.md、feature_list.json、status.md",
+      "last_commit": ""
+    },
+    {
+      "id": "F002",
+      "title": "后续功能准入模板",
+      "status": "pending",
+      "depends_on": [
+        "F001"
+      ],
+      "acceptance": [
+        "每个新功能先写清目标、非目标、交付物和验收方式",
+        "涉及高风险领域时先创建专项计划",
+        "编码型功能包含注释补齐与规范自检"
+      ],
+      "verify": [
+        "人工检查新增功能计划或任务条目"
+      ],
+      "passes": false,
+      "evidence": "",
+      "last_commit": ""
+    },
+    {
+      "id": "F003",
+      "title": "验证命令基线确认",
+      "status": "pending",
+      "depends_on": [
+        "F001"
+      ],
+      "acceptance": [
+        "后端、前端、集成和迁移相关改动都有默认验证命令",
+        "最终回复能区分已验证、未验证和待真实环境联调"
+      ],
+      "verify": [
+        "人工检查 status.md 的 Handoff.commands",
+        "按具体功能运行匹配命令"
+      ],
+      "passes": false,
+      "evidence": "",
+      "last_commit": ""
+    }
+  ]
+}
