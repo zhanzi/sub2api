@@ -79,14 +79,26 @@ git push origin product/zhanzi
 
 `product/zhanzi` 合入上游更新默认使用 `git merge main`，不对长期产品分支做反复 rebase，避免改写共享历史。
 
-## 6. 冲突与验证要求
+## 6. 私有镜像发布流程
+
+- 本 fork 生成并推送产品镜像时，默认使用私有仓库脚本 `deploy/push_private_image.sh`。
+- 该脚本默认推送到 `devtest.pointlife365.net:5180/slzr/sub2api`，同时推送不可变版本标签和 `latest` 标签。
+- 私有仓库密码默认从 `deploy/registry-password.txt` 读取；该文件只允许本地保存，严禁提交。
+- 除非用户明确要求发布正式 GitHub Release 或 GHCR 镜像，不得直接按 `.github/workflows/release.yml` / GoReleaser 默认配置推送 `ghcr.io/<owner>/sub2api`。
+- 在 Windows 环境执行脚本时，优先使用 Git Bash，例如：
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' deploy/push_private_image.sh
+```
+
+## 7. 冲突与验证要求
 
 - 合并上游时若发生冲突，必须优先保留上游通用修复，再重新套用本 fork 的定制逻辑。
 - 冲突解决不得依赖中文展示文案或临时字符串判断业务语义，应以结构化字段、枚举、接口契约和测试为准。
 - 涉及后端改动时，至少运行相关 `go test`；涉及前端改动时，使用 `pnpm`，不得改用 `npm`。
 - 未运行验证命令，不得声明“完成”“通过”“可用”或“已修复”。
 
-## 7. 文档与规则维护
+## 8. 文档与规则维护
 
 - 本 fork 的长期流程、AI 协作规则和分支策略优先维护在本文件。
 - 如需兼容 Claude Code 等工具，可在同层创建短 `CLAUDE.MD` 跳转到本文件，但不要复制维护第二份长规则。
