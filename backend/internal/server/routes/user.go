@@ -124,6 +124,7 @@ func RegisterUserRoutes(
 		images := authenticated.Group("/image-generation")
 		{
 			images.GET("/bootstrap", h.ImageGeneration.Bootstrap)
+			images.PUT("/preference", h.ImageGeneration.SavePreference)
 			images.GET("/tasks", h.ImageGeneration.ListTasks)
 			images.GET("/tasks/:id", h.ImageGeneration.GetTask)
 			images.POST("/generations", h.ImageGeneration.Generate)

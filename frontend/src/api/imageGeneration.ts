@@ -5,6 +5,17 @@ export interface ImageGenerationSettings {
   default_group_id: number
   default_model: string
   retention_days: number
+  key_selection: 'system' | 'user_key'
+  selected_api_key_id?: number
+  available_api_keys: ImageGenerationSelectableAPIKey[]
+}
+
+export interface ImageGenerationSelectableAPIKey {
+  id: number
+  name: string
+  masked_key: string
+  group_id: number
+  group_name: string
 }
 
 export interface ImageGenerationResult {
@@ -38,6 +49,14 @@ export interface ImageGenerationListResponse {
 
 export async function getImageGenerationBootstrap(): Promise<ImageGenerationSettings> {
   const { data } = await apiClient.get<ImageGenerationSettings>('/image-generation/bootstrap')
+  return data
+}
+
+export async function saveImageGenerationPreference(payload: {
+  key_selection: 'system' | 'user_key'
+  api_key_id?: number
+}): Promise<ImageGenerationSettings> {
+  const { data } = await apiClient.put<ImageGenerationSettings>('/image-generation/preference', payload)
   return data
 }
 

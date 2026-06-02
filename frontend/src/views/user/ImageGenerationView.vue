@@ -1,13 +1,6 @@
 <template>
   <AppLayout>
     <div class="space-y-5">
-      <div class="flex justify-end">
-        <button class="btn btn-secondary inline-flex items-center gap-2" :disabled="historyLoading" @click="() => loadHistory()">
-          <Icon name="refresh" size="sm" :class="historyLoading ? 'animate-spin' : ''" />
-          刷新
-        </button>
-      </div>
-
       <div
         v-if="errorMessage"
         class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-200"
@@ -15,20 +8,38 @@
         {{ errorMessage }}
       </div>
 
-      <div class="grid gap-5 xl:grid-cols-[430px_minmax(0,1fr)]">
-        <section class="card">
-          <div class="border-b border-gray-100 px-5 py-4 dark:border-dark-700">
+      <div class="grid gap-4 xl:grid-cols-[430px_minmax(0,1fr)]">
+        <div class="space-y-3">
+          <section class="rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-800">
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="shrink-0 text-sm font-medium text-gray-700 dark:text-gray-200">API Key</span>
+              <select
+                v-model="selectedApiKeyValue"
+                class="input h-8 min-w-0 flex-1 py-1 text-sm"
+                :disabled="savingPreference || !bootstrap?.enabled"
+                @change="saveSelectedApiKey"
+              >
+                <option value="system">系统默认图片通道</option>
+                <option
+                  v-for="key in availableApiKeys"
+                  :key="key.id"
+                  :value="String(key.id)"
+                >
+                  {{ key.name }} · {{ key.group_name || `分组 #${key.group_id}` }}
+                </option>
+              </select>
+              <Icon v-if="savingPreference" name="refresh" size="sm" class="shrink-0 animate-spin text-primary-500" />
+            </div>
+          </section>
+
+          <section class="card">
+          <div class="border-b border-gray-100 px-5 py-3 dark:border-dark-700">
             <div class="flex items-center justify-between gap-3">
-              <div>
-                <h2 class="text-base font-semibold text-gray-900 dark:text-white">生成参数</h2>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  提交后任务会立即进入右侧列表，可继续准备下一张。
-                </p>
-              </div>
-              <div class="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
+              <h2 class="text-base font-semibold text-gray-900 dark:text-white">生成参数</h2>
+              <div class="inline-flex shrink-0 rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
                 <button
                   type="button"
-                  class="rounded-md px-3 py-1.5 text-sm font-medium transition"
+                  class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition"
                   :class="mode === 'generation' ? activeTabClass : idleTabClass"
                   @click="switchMode('generation')"
                 >
@@ -36,7 +47,7 @@
                 </button>
                 <button
                   type="button"
-                  class="rounded-md px-3 py-1.5 text-sm font-medium transition"
+                  class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition"
                   :class="mode === 'edit' ? activeTabClass : idleTabClass"
                   @click="switchMode('edit')"
                 >
@@ -164,7 +175,8 @@
               {{ submitting ? '提交中...' : mode === 'edit' ? '提交编辑' : '生成图片' }}
             </button>
           </div>
-        </section>
+          </section>
+        </div>
 
         <section class="space-y-4">
           <div class="card">
@@ -175,6 +187,10 @@
                   当前共 {{ total }} 条任务，{{ pendingCount }} 条正在生成，保存 {{ bootstrap?.retention_days || 30 }} 天。
                 </p>
               </div>
+              <button class="btn btn-secondary inline-flex items-center gap-2 self-start sm:self-auto" :disabled="historyLoading" @click="() => loadHistory()">
+                <Icon name="refresh" size="sm" :class="historyLoading ? 'animate-spin' : ''" />
+                刷新
+              </button>
             </div>
 
             <div v-if="historyLoading && tasks.length === 0" class="p-8 text-center text-sm text-gray-500">
@@ -355,7 +371,9 @@ import {
   getImageGenerationBootstrap,
   getImageGenerationTask,
   listImageGenerationTasks,
+  saveImageGenerationPreference,
   type ImageGenerationResult,
+  type ImageGenerationSelectableAPIKey,
   type ImageGenerationSettings,
   type ImageGenerationTask,
 } from '@/api/imageGeneration'
@@ -411,6 +429,8 @@ const sizeMap: Record<SizeTier, Record<SizeRatio, string>> = {
 }
 
 const bootstrap = ref<ImageGenerationSettings | null>(null)
+const selectedApiKeyValue = ref('system')
+const savingPreference = ref(false)
 const tasks = ref<LocalTask[]>([])
 const total = ref(0)
 const mode = ref<'generation' | 'edit'>('generation')
@@ -450,6 +470,7 @@ const resolvedSize = computed(() => {
 
 const pendingCount = computed(() => tasks.value.filter((task) => task.status === 'pending').length)
 const hasMore = computed(() => currentPage.value < totalPages.value)
+const availableApiKeys = computed<ImageGenerationSelectableAPIKey[]>(() => bootstrap.value?.available_api_keys || [])
 
 const canSubmit = computed(() => {
   if (submitting.value) return false
@@ -483,9 +504,38 @@ async function loadBootstrap() {
   try {
     bootstrap.value = await getImageGenerationBootstrap()
     model.value = bootstrap.value.default_model || 'gpt-image-2'
+    selectedApiKeyValue.value = bootstrap.value.key_selection === 'user_key' && bootstrap.value.selected_api_key_id
+      ? String(bootstrap.value.selected_api_key_id)
+      : 'system'
     errorMessage.value = ''
   } catch (error) {
     errorMessage.value = extractApiErrorMessage(error, '图片生成页面未启用或配置不完整')
+  }
+}
+
+async function saveSelectedApiKey() {
+  if (!bootstrap.value?.enabled) return
+  const previous = bootstrap.value
+  savingPreference.value = true
+  try {
+    const value = selectedApiKeyValue.value
+    bootstrap.value = await saveImageGenerationPreference(
+      value === 'system'
+        ? { key_selection: 'system' }
+        : { key_selection: 'user_key', api_key_id: Number(value) },
+    )
+    selectedApiKeyValue.value = bootstrap.value.key_selection === 'user_key' && bootstrap.value.selected_api_key_id
+      ? String(bootstrap.value.selected_api_key_id)
+      : 'system'
+    appStore.showSuccess('图片生成 API Key 已更新')
+  } catch (error) {
+    bootstrap.value = previous
+    selectedApiKeyValue.value = previous.key_selection === 'user_key' && previous.selected_api_key_id
+      ? String(previous.selected_api_key_id)
+      : 'system'
+    appStore.showError(extractApiErrorMessage(error, '保存 API Key 选择失败'))
+  } finally {
+    savingPreference.value = false
   }
 }
 
@@ -565,13 +615,17 @@ async function submit() {
 }
 
 function buildCommonPayload() {
-  return {
+  const payload: Record<string, unknown> = {
     model: model.value.trim() || bootstrap.value?.default_model || 'gpt-image-2',
     prompt: prompt.value.trim(),
     size: resolvedSize.value,
     quality: quality.value,
     n: Math.min(4, Math.max(1, Number(n.value) || 1)),
   }
+  if (selectedApiKeyValue.value !== 'system') {
+    payload.api_key_id = Number(selectedApiKeyValue.value)
+  }
+  return payload
 }
 
 async function submitGeneration(payload: Record<string, unknown>) {

@@ -23,6 +23,7 @@ var (
 	ErrImageGenerationConfigInvalid = infraImageGenerationError("IMAGE_GENERATION_CONFIG_INVALID", "image generation page is not configured correctly")
 	ErrImageGenerationTaskNotFound  = infraImageGenerationError("IMAGE_GENERATION_TASK_NOT_FOUND", "image generation task not found")
 	ErrImageGenerationNoOutput      = infraImageGenerationError("IMAGE_GENERATION_NO_OUTPUT", "image generation response did not contain images")
+	ErrImageGenerationAPIKeyInvalid = infraImageGenerationError("IMAGE_GENERATION_API_KEY_INVALID", "image generation api key is not available")
 )
 
 const (
@@ -34,6 +35,9 @@ const (
 	ImageGenerationStatusFailed    = "failed"
 	ImageGenerationStatusDeleted   = "deleted"
 	ImageGenerationStatusExpired   = "expired"
+
+	ImageGenerationKeySelectionSystem  = "system"
+	ImageGenerationKeySelectionUserKey = "user_key"
 )
 
 type ImageGenerationTask struct {
@@ -112,6 +116,24 @@ type ImageGenerationSettings struct {
 	RetentionDays  int    `json:"retention_days"`
 }
 
+type ImageGenerationBootstrap struct {
+	Enabled          bool                              `json:"enabled"`
+	DefaultGroupID   int64                             `json:"default_group_id"`
+	DefaultModel     string                            `json:"default_model"`
+	RetentionDays    int                               `json:"retention_days"`
+	KeySelection     string                            `json:"key_selection"`
+	SelectedAPIKeyID *int64                            `json:"selected_api_key_id,omitempty"`
+	AvailableAPIKeys []ImageGenerationSelectableAPIKey `json:"available_api_keys"`
+}
+
+type ImageGenerationSelectableAPIKey struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	MaskedKey string `json:"masked_key"`
+	GroupID   int64  `json:"group_id"`
+	GroupName string `json:"group_name"`
+}
+
 type ImageGenerationPurposeKeyInput struct {
 	UserID  int64
 	GroupID int64
@@ -132,6 +154,10 @@ type ImageGenerationRepository interface {
 	MarkTaskExpired(ctx context.Context, taskID int64, deletedAt time.Time, errorMessage *string) error
 	GetOrCreatePurposeAPIKey(ctx context.Context, input ImageGenerationPurposeKeyInput) (*APIKey, error)
 	GetResultByUser(ctx context.Context, userID, resultID int64) (*ImageGenerationResult, error)
+	ListSelectableAPIKeys(ctx context.Context, userID int64) ([]APIKey, error)
+	GetSelectableAPIKey(ctx context.Context, userID, apiKeyID int64) (*APIKey, error)
+	GetPreferredAPIKeyID(ctx context.Context, userID int64) (*int64, error)
+	SetPreferredAPIKeyID(ctx context.Context, userID int64, apiKeyID *int64) error
 }
 
 type ImageGenerationService struct {
@@ -191,6 +217,61 @@ func (s *ImageGenerationService) Bootstrap(ctx context.Context, userID int64) (*
 		}
 	}
 	return settings, key, nil
+}
+
+func (s *ImageGenerationService) BootstrapView(ctx context.Context, userID int64) (*ImageGenerationBootstrap, error) {
+	settings, _, err := s.Bootstrap(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := s.selectableAPIKeys(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := imageGenerationBootstrapFromSettings(settings, keys)
+	preferredID, err := s.repo.GetPreferredAPIKeyID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if preferredID == nil {
+		return out, nil
+	}
+	key, err := s.repo.GetSelectableAPIKey(ctx, userID, *preferredID)
+	if err != nil || !isSelectableImageGenerationAPIKey(key) {
+		_ = s.repo.SetPreferredAPIKeyID(ctx, userID, nil)
+		return out, nil
+	}
+	out.KeySelection = ImageGenerationKeySelectionUserKey
+	out.SelectedAPIKeyID = &key.ID
+	return out, nil
+}
+
+func (s *ImageGenerationService) SavePreference(ctx context.Context, userID int64, apiKeyID *int64) (*ImageGenerationBootstrap, error) {
+	if s == nil || s.repo == nil {
+		return nil, fmt.Errorf("image generation service not ready")
+	}
+	if apiKeyID != nil {
+		key, err := s.repo.GetSelectableAPIKey(ctx, userID, *apiKeyID)
+		if err != nil || !isSelectableImageGenerationAPIKey(key) {
+			return nil, ErrImageGenerationAPIKeyInvalid
+		}
+	}
+	if err := s.repo.SetPreferredAPIKeyID(ctx, userID, apiKeyID); err != nil {
+		return nil, err
+	}
+	return s.BootstrapView(ctx, userID)
+}
+
+func (s *ImageGenerationService) ResolveAPIKeyForRequest(ctx context.Context, userID int64, apiKeyID *int64) (*APIKey, error) {
+	if apiKeyID == nil || *apiKeyID <= 0 {
+		_, key, err := s.Bootstrap(ctx, userID)
+		return key, err
+	}
+	key, err := s.repo.GetSelectableAPIKey(ctx, userID, *apiKeyID)
+	if err != nil || !isSelectableImageGenerationAPIKey(key) {
+		return nil, ErrImageGenerationAPIKeyInvalid
+	}
+	return key, nil
 }
 
 func (s *ImageGenerationService) GetSettings(ctx context.Context) (*ImageGenerationSettings, error) {
@@ -622,6 +703,83 @@ func infraImageGenerationError(reason, message string) error {
 	}
 }
 
+func (s *ImageGenerationService) selectableAPIKeys(ctx context.Context, userID int64) ([]ImageGenerationSelectableAPIKey, error) {
+	if s == nil || s.repo == nil {
+		return nil, fmt.Errorf("image generation service not ready")
+	}
+	keys, err := s.repo.ListSelectableAPIKeys(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ImageGenerationSelectableAPIKey, 0, len(keys))
+	for i := range keys {
+		key := &keys[i]
+		if !isSelectableImageGenerationAPIKey(key) {
+			continue
+		}
+		groupID := int64(0)
+		groupName := ""
+		if key.GroupID != nil {
+			groupID = *key.GroupID
+		}
+		if key.Group != nil {
+			groupName = key.Group.Name
+		}
+		out = append(out, ImageGenerationSelectableAPIKey{
+			ID:        key.ID,
+			Name:      key.Name,
+			MaskedKey: maskAPIKeyForImageGeneration(key.Key),
+			GroupID:   groupID,
+			GroupName: groupName,
+		})
+	}
+	return out, nil
+}
+
+func imageGenerationBootstrapFromSettings(settings *ImageGenerationSettings, keys []ImageGenerationSelectableAPIKey) *ImageGenerationBootstrap {
+	if settings == nil {
+		settings = &ImageGenerationSettings{DefaultModel: "gpt-image-2", RetentionDays: 30}
+	}
+	return &ImageGenerationBootstrap{
+		Enabled:          settings.Enabled,
+		DefaultGroupID:   settings.DefaultGroupID,
+		DefaultModel:     settingsDefaultModel(settings),
+		RetentionDays:    settings.RetentionDays,
+		KeySelection:     ImageGenerationKeySelectionSystem,
+		AvailableAPIKeys: keys,
+	}
+}
+
+func isSelectableImageGenerationAPIKey(key *APIKey) bool {
+	if key == nil || key.UserID <= 0 || key.ID <= 0 {
+		return false
+	}
+	if strings.TrimSpace(key.Purpose) != "" && key.Purpose != APIKeyPurposeUser {
+		return false
+	}
+	if key.Status != StatusActive && key.Status != StatusAPIKeyActive {
+		return false
+	}
+	if key.IsExpired() || key.IsQuotaExhausted() {
+		return false
+	}
+	if key.GroupID == nil || *key.GroupID <= 0 || key.Group == nil {
+		return false
+	}
+	return key.Group.Status == StatusActive && key.Group.Platform == PlatformOpenAI && key.Group.AllowImageGeneration
+}
+
+func maskAPIKeyForImageGeneration(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if len(key) <= 10 {
+		return key[:min(len(key), 4)] + "..."
+	}
+	return key[:6] + "..." + key[len(key)-4:]
+}
+
 func (s *ImageGenerationService) ensurePurposeKey(ctx context.Context, userID, groupID int64) (*APIKey, error) {
 	if s == nil || s.repo == nil || s.apiKeyService == nil {
 		return nil, fmt.Errorf("image generation service not ready")
@@ -691,17 +849,21 @@ func extractImageGenerationOutputs(body []byte) ([]ImageGenerationOutputImage, e
 }
 
 type memoryImageGenerationRepo struct {
-	mu      sync.Mutex
-	nextID  int64
-	nextRID int64
-	tasks   map[int64]ImageGenerationTask
+	mu          sync.Mutex
+	nextID      int64
+	nextRID     int64
+	tasks       map[int64]ImageGenerationTask
+	apiKeys     map[int64]APIKey
+	preferences map[int64]int64
 }
 
 func newMemoryImageGenerationRepo() *memoryImageGenerationRepo {
 	return &memoryImageGenerationRepo{
-		nextID:  1,
-		nextRID: 1,
-		tasks:   map[int64]ImageGenerationTask{},
+		nextID:      1,
+		nextRID:     1,
+		tasks:       map[int64]ImageGenerationTask{},
+		apiKeys:     map[int64]APIKey{},
+		preferences: map[int64]int64{},
 	}
 }
 
@@ -874,6 +1036,56 @@ func (r *memoryImageGenerationRepo) GetResultByUser(_ context.Context, userID, r
 	return nil, ErrImageGenerationTaskNotFound
 }
 
+func (r *memoryImageGenerationRepo) ListSelectableAPIKeys(_ context.Context, userID int64) ([]APIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []APIKey
+	for _, key := range r.apiKeys {
+		if key.UserID == userID && isSelectableImageGenerationAPIKey(&key) {
+			out = append(out, cloneAPIKeyForImageGeneration(key))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (r *memoryImageGenerationRepo) GetSelectableAPIKey(_ context.Context, userID, apiKeyID int64) (*APIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key, ok := r.apiKeys[apiKeyID]
+	if !ok || key.UserID != userID || !isSelectableImageGenerationAPIKey(&key) {
+		return nil, ErrImageGenerationAPIKeyInvalid
+	}
+	cp := cloneAPIKeyForImageGeneration(key)
+	return &cp, nil
+}
+
+func (r *memoryImageGenerationRepo) GetPreferredAPIKeyID(_ context.Context, userID int64) (*int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, ok := r.preferences[userID]
+	if !ok || id <= 0 {
+		return nil, nil
+	}
+	return &id, nil
+}
+
+func (r *memoryImageGenerationRepo) SetPreferredAPIKeyID(_ context.Context, userID int64, apiKeyID *int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if apiKeyID == nil || *apiKeyID <= 0 {
+		delete(r.preferences, userID)
+		return nil
+	}
+	r.preferences[userID] = *apiKeyID
+	return nil
+}
+
 func cloneImageGenerationTask(task ImageGenerationTask) ImageGenerationTask {
 	if len(task.RequestJSON) > 0 {
 		task.RequestJSON = append([]byte(nil), task.RequestJSON...)
@@ -882,4 +1094,12 @@ func cloneImageGenerationTask(task ImageGenerationTask) ImageGenerationTask {
 		task.Results = append([]ImageGenerationResult(nil), task.Results...)
 	}
 	return task
+}
+
+func cloneAPIKeyForImageGeneration(key APIKey) APIKey {
+	if key.Group != nil {
+		group := *key.Group
+		key.Group = &group
+	}
+	return key
 }

@@ -36,7 +36,37 @@ func (h *ImageGenerationHandler) Bootstrap(c *gin.Context) {
 		response.Unauthorized(c, "unauthorized")
 		return
 	}
-	settings, _, err := h.service.Bootstrap(c.Request.Context(), subject.UserID)
+	settings, err := h.service.BootstrapView(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, settings)
+}
+
+func (h *ImageGenerationHandler) SavePreference(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "unauthorized")
+		return
+	}
+	var req struct {
+		KeySelection string `json:"key_selection"`
+		APIKeyID     *int64 `json:"api_key_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		response.BadRequest(c, "invalid request body")
+		return
+	}
+	var selected *int64
+	if req.KeySelection == service.ImageGenerationKeySelectionUserKey {
+		selected = req.APIKeyID
+		if selected == nil || *selected <= 0 {
+			response.ErrorFrom(c, service.ErrImageGenerationAPIKeyInvalid)
+			return
+		}
+	}
+	settings, err := h.service.SavePreference(c.Request.Context(), subject.UserID, selected)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -127,14 +157,23 @@ func (h *ImageGenerationHandler) proxyImages(c *gin.Context, mode, path string) 
 		response.Unauthorized(c, "unauthorized")
 		return
 	}
-	_, apiKey, err := h.service.Bootstrap(c.Request.Context(), subject.UserID)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		response.BadRequest(c, "failed to read request body")
+		return
+	}
+	contentType := c.GetHeader("Content-Type")
+	apiKeyID, body, contentType, err := extractImageGenerationAPIKeyID(contentType, body)
+	if err != nil {
+		response.BadRequest(c, "invalid api key selection")
+		return
+	}
+	if contentType != "" {
+		c.Request.Header.Set("Content-Type", contentType)
+	}
+	apiKey, err := h.service.ResolveAPIKeyForRequest(c.Request.Context(), subject.UserID, apiKeyID)
+	if err != nil {
+		response.ErrorFrom(c, err)
 		return
 	}
 	recordBody := body
@@ -142,7 +181,6 @@ func (h *ImageGenerationHandler) proxyImages(c *gin.Context, mode, path string) 
 		body = ensureImageGenerationB64Response(body)
 		recordBody = body
 	} else {
-		contentType := c.GetHeader("Content-Type")
 		sourceID := parseImageGenerationSourceResultID(contentType, body)
 		if sourceID > 0 && mode == service.ImageGenerationModeEdit && !imageGenerationMultipartHasFile(contentType, body, "image") {
 			result, abs, err := h.service.GetResultFile(c.Request.Context(), subject.UserID, sourceID)
@@ -217,6 +255,108 @@ func ensureImageGenerationB64Response(body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func extractImageGenerationAPIKeyID(contentType string, body []byte) (*int64, []byte, string, error) {
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return extractImageGenerationAPIKeyIDFromMultipart(contentType, body)
+	}
+	var obj map[string]any
+	if len(body) == 0 {
+		return nil, body, contentType, nil
+	}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, body, contentType, nil
+	}
+	apiKeyID := parseJSONInt64(obj["api_key_id"])
+	delete(obj, "api_key_id")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, body, contentType, err
+	}
+	if apiKeyID <= 0 {
+		return nil, out, contentType, nil
+	}
+	return &apiKeyID, out, contentType, nil
+}
+
+func extractImageGenerationAPIKeyIDFromMultipart(contentType string, body []byte) (*int64, []byte, string, error) {
+	req := httptest.NewRequest(http.MethodPost, "/rewrite", bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	if err := req.ParseMultipartForm(64 << 20); err != nil {
+		return nil, body, contentType, err
+	}
+	defer func(form *multipart.Form) {
+		if form != nil {
+			_ = form.RemoveAll()
+		}
+	}(req.MultipartForm)
+
+	apiKeyID, _ := strconv.ParseInt(strings.TrimSpace(req.FormValue("api_key_id")), 10, 64)
+	var out bytes.Buffer
+	writer := multipart.NewWriter(&out)
+	for key, values := range req.MultipartForm.Value {
+		if key == "api_key_id" {
+			continue
+		}
+		for _, value := range values {
+			if err := writer.WriteField(key, value); err != nil {
+				_ = writer.Close()
+				return nil, nil, "", err
+			}
+		}
+	}
+	for key, files := range req.MultipartForm.File {
+		for _, header := range files {
+			file, err := header.Open()
+			if err != nil {
+				_ = writer.Close()
+				return nil, nil, "", err
+			}
+			partHeader := textproto.MIMEHeader{}
+			for headerKey, values := range header.Header {
+				partHeader[headerKey] = append([]string(nil), values...)
+			}
+			if partHeader.Get("Content-Disposition") == "" {
+				partHeader.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, escapeMultipartQuote(key), escapeMultipartQuote(header.Filename)))
+			}
+			part, err := writer.CreatePart(partHeader)
+			if err != nil {
+				_ = file.Close()
+				_ = writer.Close()
+				return nil, nil, "", err
+			}
+			if _, err := io.Copy(part, file); err != nil {
+				_ = file.Close()
+				_ = writer.Close()
+				return nil, nil, "", err
+			}
+			_ = file.Close()
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, nil, "", err
+	}
+	if apiKeyID <= 0 {
+		return nil, out.Bytes(), writer.FormDataContentType(), nil
+	}
+	return &apiKeyID, out.Bytes(), writer.FormDataContentType(), nil
+}
+
+func parseJSONInt64(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case string:
+		id, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return id
+	default:
+		return 0
+	}
 }
 
 func summarizeImageGenerationMultipart(contentType string, body []byte) []byte {
