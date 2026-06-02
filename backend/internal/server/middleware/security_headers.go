@@ -28,6 +28,8 @@ const (
 	AirwallexDemoStaticDomain = "https://static-demo.airwallex.com"
 	// AirwallexDemoCheckoutDomain 是 Airwallex 沙箱环境收银台元素和 iframe 域名。
 	AirwallexDemoCheckoutDomain = "https://checkout-demo.airwallex.com"
+	// BlobSource 允许前端把需认证接口返回的 Blob 图片用于本地预览。
+	BlobSource = "blob:"
 )
 
 var requiredCSPDirectiveValues = []struct {
@@ -47,6 +49,7 @@ var requiredCSPDirectiveValues = []struct {
 	{"style-src", AirwallexDemoStaticDomain},
 	{"style-src", AirwallexDemoCheckoutDomain},
 	{"frame-src", AirwallexDemoCheckoutDomain},
+	{"img-src", BlobSource},
 }
 
 // GenerateNonce generates a cryptographically secure random nonce.
