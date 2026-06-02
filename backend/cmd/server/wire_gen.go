@@ -248,7 +248,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	imageGenerationRepository := repository.NewImageGenerationRepository(db)
 	imageGenerationStorageConfig := service.ProvideImageGenerationStorageConfig(configConfig)
 	imageGenerationService := service.NewImageGenerationService(imageGenerationRepository, settingService, apiKeyService, openAIGatewayService, groupRepository, imageGenerationStorageConfig)
-	imageGenerationHandler := handler.NewImageGenerationHandler(imageGenerationService, openAIGatewayHandler)
+	imageGenerationHandler := handler.NewImageGenerationHandler(imageGenerationService, openAIGatewayHandler, subscriptionService)
 	handlerSettingHandler := handler.ProvideSettingHandler(settingService, buildInfo, notificationEmailService)
 	totpHandler := handler.NewTotpHandler(totpService)
 	handlerPaymentHandler := handler.NewPaymentHandler(paymentService, paymentConfigService, channelService)
