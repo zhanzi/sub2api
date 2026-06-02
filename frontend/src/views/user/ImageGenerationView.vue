@@ -199,7 +199,7 @@
             <div v-else-if="tasks.length === 0" class="p-8 text-center text-sm text-gray-500">
               还没有图片记录。
             </div>
-            <div v-else class="grid gap-4 p-5 sm:grid-cols-2 2xl:grid-cols-3">
+            <div v-else class="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 min-[1800px]:grid-cols-5">
               <article
                 v-for="task in tasks"
                 :key="task.local_id || task.id"
@@ -228,7 +228,7 @@
                   <span class="text-sm">{{ task.status === 'failed' ? '生成失败' : '生成中...' }}</span>
                 </div>
 
-                <div class="space-y-3 p-3">
+                <div class="space-y-2.5 p-3">
                   <div class="flex items-center justify-between gap-2">
                     <span class="rounded-full px-2 py-0.5 text-xs font-medium" :class="statusClass(task.status)">
                       {{ statusLabel(task.status) }}
@@ -319,32 +319,78 @@
 
       <div
         v-if="preview"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 sm:p-4"
         @click.self="closePreview"
       >
-        <div class="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-lg bg-white shadow-xl dark:bg-dark-800">
+        <div class="max-h-[94vh] w-full max-w-7xl overflow-hidden rounded-lg bg-white shadow-xl dark:bg-dark-800">
           <div class="flex items-center justify-between border-b border-gray-100 px-4 py-3 dark:border-dark-700">
             <div>
               <h3 class="text-sm font-semibold text-gray-900 dark:text-white">图片预览</h3>
-              <p class="text-xs text-gray-500 dark:text-gray-400">{{ preview.task.model }} · {{ preview.task.size || '' }}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400">
+                第 {{ preview.result.index + 1 }} / {{ preview.task.results.length }} 张 · {{ preview.task.model }} · {{ preview.task.size || '' }}
+              </p>
             </div>
             <button type="button" class="btn btn-secondary btn-sm" @click="closePreview">
               <Icon name="x" size="xs" />
             </button>
           </div>
-          <div class="grid max-h-[calc(92vh-56px)] gap-0 overflow-auto lg:grid-cols-[minmax(0,1fr)_320px]">
-            <div class="flex items-center justify-center bg-gray-950 p-4">
-              <img :src="imageUrl(preview.result.id)" class="max-h-[75vh] max-w-full object-contain" :alt="preview.task.prompt" />
+          <div class="grid max-h-[calc(94vh-56px)] overflow-auto lg:grid-cols-[minmax(0,1fr)_340px]">
+            <div class="flex min-h-[55vh] flex-col bg-gray-950">
+              <div class="flex flex-1 items-center justify-center p-3 sm:p-5">
+                <img :src="imageUrl(preview.result.id)" class="max-h-[76vh] max-w-full object-contain" :alt="preview.task.prompt" />
+              </div>
+              <div
+                v-if="preview.task.results.length > 1"
+                class="flex gap-2 overflow-x-auto border-t border-white/10 bg-black/30 p-3"
+              >
+                <button
+                  v-for="result in preview.task.results"
+                  :key="result.id"
+                  type="button"
+                  class="h-16 w-16 shrink-0 overflow-hidden rounded-md border bg-gray-900 transition"
+                  :class="preview.result.id === result.id ? 'border-primary-400 ring-2 ring-primary-400/30' : 'border-white/15 hover:border-white/40'"
+                  :aria-label="`预览第 ${result.index + 1} 张`"
+                  @click="openPreview(preview.task, result)"
+                >
+                  <img :src="imageUrl(result.id)" class="h-full w-full object-cover" :alt="`${preview.task.prompt} ${result.index + 1}`" />
+                </button>
+              </div>
             </div>
-            <div class="space-y-4 p-4">
+            <div class="space-y-4 border-t border-gray-100 p-4 dark:border-dark-700 lg:border-l lg:border-t-0">
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div class="rounded-md bg-gray-50 p-2 dark:bg-dark-700/70">
+                  <div class="text-gray-500 dark:text-gray-400">状态</div>
+                  <div class="mt-1 font-medium text-gray-900 dark:text-white">{{ statusLabel(preview.task.status) }}</div>
+                </div>
+                <div class="rounded-md bg-gray-50 p-2 dark:bg-dark-700/70">
+                  <div class="text-gray-500 dark:text-gray-400">结果</div>
+                  <div class="mt-1 font-medium text-gray-900 dark:text-white">第 {{ preview.result.index + 1 }} / {{ preview.task.results.length }} 张</div>
+                </div>
+                <div class="rounded-md bg-gray-50 p-2 dark:bg-dark-700/70">
+                  <div class="text-gray-500 dark:text-gray-400">尺寸</div>
+                  <div class="mt-1 font-medium text-gray-900 dark:text-white">{{ preview.task.size || '-' }}</div>
+                </div>
+                <div class="rounded-md bg-gray-50 p-2 dark:bg-dark-700/70">
+                  <div class="text-gray-500 dark:text-gray-400">文件</div>
+                  <div class="mt-1 font-medium text-gray-900 dark:text-white">{{ formatBytes(preview.result.size_bytes) }}</div>
+                </div>
+                <div class="col-span-2 rounded-md bg-gray-50 p-2 dark:bg-dark-700/70">
+                  <div class="text-gray-500 dark:text-gray-400">生成时间</div>
+                  <div class="mt-1 font-medium text-gray-900 dark:text-white">{{ formatDate(preview.task.created_at) }}</div>
+                </div>
+              </div>
               <div>
                 <div class="text-xs font-medium uppercase text-gray-500 dark:text-gray-400">Prompt</div>
-                <p class="mt-2 whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-100">{{ preview.task.prompt || '无提示词' }}</p>
+                <p class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-sm leading-6 text-gray-800 dark:text-gray-100">{{ preview.task.prompt || '无提示词' }}</p>
               </div>
               <div class="flex flex-wrap gap-2">
                 <button type="button" class="btn btn-primary btn-sm inline-flex items-center gap-1" @click="editFromResult(preview.task, preview.result)">
                   <Icon name="edit" size="xs" />
                   基于此图编辑
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm inline-flex items-center gap-1" @click="reuseFromPreview(preview.task)">
+                  <Icon name="copy" size="xs" />
+                  复用提示词
                 </button>
                 <button type="button" class="btn btn-secondary btn-sm inline-flex items-center gap-1" @click="downloadResult(preview.result)">
                   <Icon name="download" size="xs" />
@@ -716,6 +762,11 @@ function reuse(task: LocalTask) {
   applySize(task.size || '')
 }
 
+function reuseFromPreview(task: LocalTask) {
+  reuse(task)
+  closePreview()
+}
+
 function editFromResult(task: LocalTask, result: ImageGenerationResult) {
   prompt.value = task.prompt
   model.value = task.model
@@ -777,6 +828,19 @@ function closePreview() {
 function formatDate(value: string) {
   if (!value) return ''
   return new Date(value).toLocaleString()
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = value
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const precision = Number.isInteger(size) || size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(precision)} ${units[unitIndex]}`
 }
 
 function statusLabel(status: string) {
