@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"testing"
@@ -43,4 +44,41 @@ func TestInjectImageGenerationSourceFileUsesHistoryResult(t *testing.T) {
 	_, err = data.ReadFrom(file)
 	require.NoError(t, err)
 	require.Equal(t, []byte("png-bytes"), data.Bytes())
+}
+
+func TestExtractImageGenerationAPIKeyIDStripsJSONField(t *testing.T) {
+	apiKeyID, rewritten, _, err := extractImageGenerationAPIKeyID("application/json", []byte(`{"model":"gpt-image-2","prompt":"hello","api_key_id":42}`))
+	require.NoError(t, err)
+	require.NotNil(t, apiKeyID)
+	require.Equal(t, int64(42), *apiKeyID)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rewritten, &payload))
+	require.Equal(t, "gpt-image-2", payload["model"])
+	require.NotContains(t, payload, "api_key_id")
+}
+
+func TestExtractImageGenerationAPIKeyIDStripsMultipartField(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("api_key_id", "42"))
+	require.NoError(t, writer.WriteField("prompt", "hello"))
+	part, err := writer.CreateFormFile("image", "source.png")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("png"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	apiKeyID, rewritten, contentType, err := extractImageGenerationAPIKeyID(writer.FormDataContentType(), body.Bytes())
+	require.NoError(t, err)
+	require.NotNil(t, apiKeyID)
+	require.Equal(t, int64(42), *apiKeyID)
+
+	req, err := http.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(rewritten))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", contentType)
+	require.NoError(t, req.ParseMultipartForm(1024))
+	require.Equal(t, "hello", req.FormValue("prompt"))
+	require.Empty(t, req.FormValue("api_key_id"))
+	require.Len(t, req.MultipartForm.File["image"], 1)
 }

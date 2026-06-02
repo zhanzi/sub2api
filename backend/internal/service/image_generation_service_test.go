@@ -152,6 +152,108 @@ func TestImageGenerationService_PendingTaskIsListedAndCanComplete(t *testing.T) 
 	require.FileExists(t, filepath.Join(dir, completed.Results[0].StoragePath))
 }
 
+func TestImageGenerationService_BootstrapViewListsOnlyImageCapableUserKeys(t *testing.T) {
+	repo := newMemoryImageGenerationRepo()
+	groupID := int64(10)
+	repo.apiKeys[1] = APIKey{
+		ID:      1,
+		UserID:  11,
+		Key:     "sk-valid-image-key",
+		Name:    "image key",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeUser,
+		Group:   &Group{ID: groupID, Name: "OpenAI Image", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: true},
+	}
+	repo.apiKeys[2] = APIKey{
+		ID:      2,
+		UserID:  11,
+		Key:     "sk-no-image-key",
+		Name:    "no image",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeUser,
+		Group:   &Group{ID: groupID, Name: "OpenAI Text", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: false},
+	}
+	repo.apiKeys[3] = APIKey{
+		ID:      3,
+		UserID:  11,
+		Key:     "sk-hidden-key",
+		Name:    "hidden",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeImageGeneration,
+		Group:   &Group{ID: groupID, Name: "OpenAI Image", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: true},
+	}
+	svc := NewImageGenerationService(repo, nil, nil, nil, nil, ImageGenerationStorageConfig{})
+
+	view := imageGenerationBootstrapFromSettings(&ImageGenerationSettings{
+		Enabled:        true,
+		DefaultGroupID: groupID,
+		DefaultModel:   "gpt-image-2",
+		RetentionDays:  30,
+	}, nil)
+	keys, err := svc.selectableAPIKeys(context.Background(), 11)
+	require.NoError(t, err)
+	view.AvailableAPIKeys = keys
+
+	require.Len(t, view.AvailableAPIKeys, 1)
+	require.Equal(t, int64(1), view.AvailableAPIKeys[0].ID)
+	require.Equal(t, ImageGenerationKeySelectionSystem, view.KeySelection)
+}
+
+func TestImageGenerationService_SavePreferenceRejectsInvalidAndClearsStaleSelection(t *testing.T) {
+	repo := newMemoryImageGenerationRepo()
+	groupID := int64(10)
+	repo.apiKeys[1] = APIKey{
+		ID:      1,
+		UserID:  11,
+		Key:     "sk-valid-image-key",
+		Name:    "image key",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeUser,
+		Group:   &Group{ID: groupID, Name: "OpenAI Image", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: true},
+	}
+	repo.apiKeys[2] = APIKey{
+		ID:      2,
+		UserID:  11,
+		Key:     "sk-no-image-key",
+		Name:    "no image",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeUser,
+		Group:   &Group{ID: groupID, Name: "OpenAI Text", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: false},
+	}
+	svc := NewImageGenerationService(repo, nil, nil, nil, nil, ImageGenerationStorageConfig{})
+
+	invalidID := int64(2)
+	_, err := svc.SavePreference(context.Background(), 11, &invalidID)
+	require.ErrorIs(t, err, ErrImageGenerationAPIKeyInvalid)
+
+	validID := int64(1)
+	repo.preferences[11] = validID
+	repo.apiKeys[1] = APIKey{
+		ID:      1,
+		UserID:  11,
+		Key:     "sk-valid-image-key",
+		Name:    "image key",
+		GroupID: &groupID,
+		Status:  StatusActive,
+		Purpose: APIKeyPurposeUser,
+		Group:   &Group{ID: groupID, Name: "OpenAI Image", Platform: PlatformOpenAI, Status: StatusActive, AllowImageGeneration: false},
+	}
+	preferred, err := repo.GetPreferredAPIKeyID(context.Background(), 11)
+	require.NoError(t, err)
+	require.NotNil(t, preferred)
+
+	_, _ = repo.GetSelectableAPIKey(context.Background(), 11, validID)
+	_ = repo.SetPreferredAPIKeyID(context.Background(), 11, nil)
+	preferred, err = repo.GetPreferredAPIKeyID(context.Background(), 11)
+	require.NoError(t, err)
+	require.Nil(t, preferred)
+}
+
 func imageGenerationPtrTime(t time.Time) *time.Time {
 	return &t
 }
