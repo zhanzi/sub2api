@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"testing"
 
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -81,4 +84,25 @@ func TestExtractImageGenerationAPIKeyIDStripsMultipartField(t *testing.T) {
 	require.Equal(t, "hello", req.FormValue("prompt"))
 	require.Empty(t, req.FormValue("api_key_id"))
 	require.Len(t, req.MultipartForm.File["image"], 1)
+}
+
+func TestSetImageGenerationGatewayContextCarriesSubscription(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	apiKey := &service.APIKey{ID: 7}
+	subject := middleware2.AuthSubject{UserID: 42, Concurrency: 3}
+	subscription := &service.UserSubscription{ID: 99, UserID: 42, GroupID: 5}
+
+	setImageGenerationGatewayContext(c, apiKey, subject, "user", subscription)
+
+	gotAPIKey, ok := middleware2.GetAPIKeyFromContext(c)
+	require.True(t, ok)
+	require.Same(t, apiKey, gotAPIKey)
+	gotSub, ok := middleware2.GetSubscriptionFromContext(c)
+	require.True(t, ok)
+	require.Same(t, subscription, gotSub)
+	gotSubject, ok := middleware2.GetAuthSubjectFromContext(c)
+	require.True(t, ok)
+	require.Equal(t, subject, gotSubject)
+	require.Equal(t, "user", c.GetString(string(middleware2.ContextKeyUserRole)))
 }

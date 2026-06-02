@@ -22,12 +22,13 @@ import (
 )
 
 type ImageGenerationHandler struct {
-	service       *service.ImageGenerationService
-	openAIGateway *OpenAIGatewayHandler
+	service             *service.ImageGenerationService
+	openAIGateway       *OpenAIGatewayHandler
+	subscriptionService *service.SubscriptionService
 }
 
-func NewImageGenerationHandler(svc *service.ImageGenerationService, openAIGateway *OpenAIGatewayHandler) *ImageGenerationHandler {
-	return &ImageGenerationHandler{service: svc, openAIGateway: openAIGateway}
+func NewImageGenerationHandler(svc *service.ImageGenerationService, openAIGateway *OpenAIGatewayHandler, subscriptionService *service.SubscriptionService) *ImageGenerationHandler {
+	return &ImageGenerationHandler{service: svc, openAIGateway: openAIGateway, subscriptionService: subscriptionService}
 }
 
 func (h *ImageGenerationHandler) Bootstrap(c *gin.Context) {
@@ -176,6 +177,11 @@ func (h *ImageGenerationHandler) proxyImages(c *gin.Context, mode, path string) 
 		response.ErrorFrom(c, err)
 		return
 	}
+	subscription, err := h.resolveImageGenerationSubscription(c.Request.Context(), apiKey)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	recordBody := body
 	if !strings.HasPrefix(strings.ToLower(c.GetHeader("Content-Type")), "multipart/form-data") {
 		body = ensureImageGenerationB64Response(body)
@@ -215,11 +221,21 @@ func (h *ImageGenerationHandler) proxyImages(c *gin.Context, mode, path string) 
 	}
 	headers := c.Request.Header.Clone()
 	role := c.GetString(string(middleware2.ContextKeyUserRole))
-	go h.runImageGenerationTask(pendingTask.ID, apiKey, subject, role, headers, body, path)
+	go h.runImageGenerationTask(pendingTask.ID, apiKey, subject, role, subscription, headers, body, path)
 	response.Success(c, imageGenerationTaskToDTO(*pendingTask))
 }
 
-func (h *ImageGenerationHandler) runImageGenerationTask(taskID int64, apiKey *service.APIKey, subject middleware2.AuthSubject, role string, headers http.Header, body []byte, path string) {
+func (h *ImageGenerationHandler) resolveImageGenerationSubscription(ctx context.Context, apiKey *service.APIKey) (*service.UserSubscription, error) {
+	if apiKey == nil || apiKey.User == nil || apiKey.Group == nil || !apiKey.Group.IsSubscriptionType() {
+		return nil, nil
+	}
+	if h.subscriptionService == nil {
+		return nil, service.ErrSubscriptionNotFound
+	}
+	return h.subscriptionService.GetActiveSubscription(ctx, apiKey.User.ID, apiKey.Group.ID)
+}
+
+func (h *ImageGenerationHandler) runImageGenerationTask(taskID int64, apiKey *service.APIKey, subject middleware2.AuthSubject, role string, subscription *service.UserSubscription, headers http.Header, body []byte, path string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	rec := httptest.NewRecorder()
@@ -228,9 +244,7 @@ func (h *ImageGenerationHandler) runImageGenerationTask(taskID int64, apiKey *se
 	req = req.WithContext(ctx)
 	req.Header = headers.Clone()
 	gc.Request = req
-	gc.Set(string(middleware2.ContextKeyAPIKey), apiKey)
-	gc.Set(string(middleware2.ContextKeyUser), subject)
-	gc.Set(string(middleware2.ContextKeyUserRole), role)
+	setImageGenerationGatewayContext(gc, apiKey, subject, role, subscription)
 
 	h.openAIGateway.Images(gc)
 	if rec.Code < 200 || rec.Code >= 300 {
@@ -239,6 +253,15 @@ func (h *ImageGenerationHandler) runImageGenerationTask(taskID int64, apiKey *se
 	}
 	if _, err := h.service.CompletePendingTaskFromResponse(context.Background(), taskID, rec.Body.Bytes()); err != nil {
 		_ = h.service.MarkTaskFailed(context.Background(), taskID, err)
+	}
+}
+
+func setImageGenerationGatewayContext(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, role string, subscription *service.UserSubscription) {
+	c.Set(string(middleware2.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware2.ContextKeyUser), subject)
+	c.Set(string(middleware2.ContextKeyUserRole), role)
+	if subscription != nil {
+		c.Set(string(middleware2.ContextKeySubscription), subscription)
 	}
 }
 
