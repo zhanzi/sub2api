@@ -25,10 +25,13 @@ interface ImageBillingRow {
 }
 
 export function isImageUsage(row: Pick<ImageBillingRow, 'image_count' | 'billing_mode'> | null | undefined): boolean {
-  return (row?.image_count ?? 0) > 0 && row?.billing_mode !== BILLING_MODE_TOKEN
+  return getDisplayBillingMode(row) === BILLING_MODE_IMAGE
 }
 
 export function getDisplayBillingMode(row: Pick<ImageBillingRow, 'billing_mode' | 'image_count'> | null | undefined): string | null | undefined {
+  if ((row?.image_count ?? 0) > 0 && (!row?.billing_mode || row.billing_mode === BILLING_MODE_TOKEN)) {
+    return BILLING_MODE_IMAGE
+  }
   return row?.billing_mode
 }
 

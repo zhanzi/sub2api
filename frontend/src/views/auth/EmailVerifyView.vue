@@ -378,6 +378,12 @@ function isPendingOAuthSessionResponse(data: PendingOAuthCreateAccountResponse):
   return data.auth_result === 'pending_session'
 }
 
+function pruneUndefined<T extends Record<string, unknown>>(payload: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(payload).filter(([, value]) => value !== undefined)
+  ) as Partial<T>
+}
+
 function getPendingOAuthSendCodeSessionResponse(
   data: PendingOAuthSendVerifyCodeResponse,
 ): PendingOAuthSendVerifyCodeResponse | null {
@@ -502,7 +508,7 @@ async function handleVerify(): Promise<void> {
     if (isPendingOAuthFlow()) {
       const { data } = await apiClient.post<PendingOAuthCreateAccountResponse>(
         '/auth/oauth/pending/create-account',
-        {
+        pruneUndefined({
           email: email.value,
           password: password.value,
           verify_code: verifyCode.value.trim(),
@@ -510,7 +516,7 @@ async function handleVerify(): Promise<void> {
           ...oauthAffiliatePayload(affCode.value || loadAffiliateReferralCode()),
           adopt_display_name: pendingAdoptionDecision.value?.adoptDisplayName,
           adopt_avatar: pendingAdoptionDecision.value?.adoptAvatar
-        }
+        })
       )
       if (isPendingOAuthSessionResponse(data)) {
         sessionStorage.removeItem('register_data')
