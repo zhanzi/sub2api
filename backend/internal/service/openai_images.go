@@ -14,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -41,6 +42,14 @@ const (
 	openAIImageMaxUploadPartSize   = 20 << 20 // 20MB per multipart upload part
 	openAIImagesResponsesMainModel = "gpt-5.4-mini"
 )
+
+var openAIImagesAsyncPollInterval = 2 * time.Second
+var openAIImagesAsyncPostReplayStatuses = map[int]struct{}{
+	http.StatusNotFound:          {},
+	http.StatusMethodNotAllowed:  {},
+	http.StatusNotImplemented:    {},
+	http.StatusPermanentRedirect: {},
+}
 
 type OpenAIImagesCapability string
 
@@ -647,6 +656,15 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		}
 		return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)
 	}
+	if resp.StatusCode == http.StatusAccepted {
+		polledResp, pollErr := s.resolveOpenAIImagesAsyncTask(upstreamCtx, c, resp, upstreamReq, proxyURL, account)
+		if pollErr != nil {
+			_ = resp.Body.Close()
+			return nil, pollErr
+		}
+		_ = resp.Body.Close()
+		resp = polledResp
+	}
 	defer func() { _ = resp.Body.Close() }()
 
 	var usage OpenAIUsage
@@ -851,6 +869,400 @@ func cloneMultipartHeader(src textproto.MIMEHeader) textproto.MIMEHeader {
 		dst[key] = copied
 	}
 	return dst
+}
+
+type openAIImagesAsyncTask struct {
+	ID      string
+	Status  string
+	PollURL string
+	Created int64
+	Raw     []byte
+}
+
+func (t openAIImagesAsyncTask) taskID() string {
+	if strings.TrimSpace(t.ID) != "" {
+		return strings.TrimSpace(t.ID)
+	}
+	return strings.TrimSpace(gjson.GetBytes(t.Raw, "task_id").String())
+}
+
+func (s *OpenAIGatewayService) resolveOpenAIImagesAsyncTask(
+	ctx context.Context,
+	c *gin.Context,
+	resp *http.Response,
+	originalReq *http.Request,
+	proxyURL string,
+	account *Account,
+) (*http.Response, error) {
+	body, err := readUpstreamResponseBodyLimited(resp.Body, resolveUpstreamResponseReadLimit(s.cfg))
+	if err != nil {
+		return nil, err
+	}
+	task, ok := parseOpenAIImagesAsyncAcceptedTask(body)
+	if !ok {
+		return cloneOpenAIImagesResponseWithBody(resp, body), nil
+	}
+
+	taskID := task.taskID()
+	pollURL, err := resolveOpenAIImagesAsyncPollURL(originalReq.URL, task.PollURL, taskID)
+	if err != nil {
+		return nil, err
+	}
+	nextDelay := openAIImagesAsyncPollDelay(resp.Header)
+	replayOriginalRequest := false
+	for {
+		if nextDelay > 0 {
+			timer := time.NewTimer(nextDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL, replayOriginalRequest)
+		if err != nil {
+			return nil, err
+		}
+		pollResp, err := s.httpUpstream.Do(pollReq, proxyURL, account.ID, account.Concurrency)
+		if err != nil {
+			safeErr := sanitizeUpstreamErrorMessage(err.Error())
+			setOpsUpstreamError(c, 0, safeErr, "")
+			return nil, fmt.Errorf("poll image task failed: %s", safeErr)
+		}
+		if pollResp == nil {
+			return nil, fmt.Errorf("poll image task failed: empty response")
+		}
+		pollBody, readErr := readUpstreamResponseBodyLimited(pollResp.Body, resolveUpstreamResponseReadLimit(s.cfg))
+		_ = pollResp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if pollResp.StatusCode >= 400 {
+			if !replayOriginalRequest && shouldReplayOpenAIImagesAsyncOriginalRequest(pollResp.StatusCode) {
+				replayOriginalRequest = true
+				nextDelay = openAIImagesAsyncPollDelay(pollResp.Header)
+				continue
+			}
+			msg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(pollBody))
+			if msg == "" {
+				msg = fmt.Sprintf("poll image task failed: status %d", pollResp.StatusCode)
+			}
+			setOpsUpstreamError(c, pollResp.StatusCode, msg, "")
+			return nil, fmt.Errorf("%s", msg)
+		}
+
+		polledTask, ok := selectOpenAIImagesAsyncTask(pollBody, taskID)
+		if !ok {
+			if openAIImagesBodyHasOutput(pollBody) {
+				return cloneOpenAIImagesResponseWithBody(pollResp, pollBody), nil
+			}
+			polledTask = openAIImagesAsyncTask{
+				ID:      taskID,
+				Status:  strings.TrimSpace(gjson.GetBytes(pollBody, "status").String()),
+				Created: firstPositiveInt64(gjson.GetBytes(pollBody, "created").Int(), gjson.GetBytes(pollBody, "created_at").Int()),
+				Raw:     pollBody,
+			}
+		}
+		status := normalizeOpenAIImagesAsyncTaskStatus(polledTask.Status)
+		switch {
+		case isOpenAIImagesAsyncPendingStatus(status):
+			if poll := strings.TrimSpace(polledTask.PollURL); poll != "" {
+				pollURL, err = resolveOpenAIImagesAsyncPollURL(originalReq.URL, poll, taskID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			nextDelay = openAIImagesAsyncPollDelay(pollResp.Header)
+			continue
+		case isOpenAIImagesAsyncSuccessStatus(status):
+			body, err := normalizeOpenAIImagesAsyncTaskResponse(polledTask.Raw, polledTask.Created)
+			if err != nil {
+				return nil, err
+			}
+			return cloneOpenAIImagesResponseWithBody(&http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     pollResp.Header.Clone(),
+			}, body), nil
+		case isOpenAIImagesAsyncFailureStatus(status):
+			msg := openAIImagesAsyncTaskErrorMessage(polledTask.Raw)
+			setOpsUpstreamError(c, http.StatusBadGateway, msg, "")
+			return nil, fmt.Errorf("%s", msg)
+		default:
+			nextDelay = openAIImagesAsyncPollDelay(pollResp.Header)
+		}
+	}
+}
+
+func parseOpenAIImagesAsyncAcceptedTask(body []byte) (openAIImagesAsyncTask, bool) {
+	task, ok := selectOpenAIImagesAsyncTask(body, "")
+	if !ok {
+		return openAIImagesAsyncTask{}, false
+	}
+	if strings.TrimSpace(gjson.GetBytes(task.Raw, "object").String()) != "image.task" {
+		return openAIImagesAsyncTask{}, false
+	}
+	if !isOpenAIImagesAsyncPendingStatus(normalizeOpenAIImagesAsyncTaskStatus(task.Status)) {
+		return openAIImagesAsyncTask{}, false
+	}
+	if strings.TrimSpace(task.PollURL) == "" && strings.TrimSpace(task.taskID()) == "" {
+		return openAIImagesAsyncTask{}, false
+	}
+	return task, true
+}
+
+func selectOpenAIImagesAsyncTask(body []byte, wantID string) (openAIImagesAsyncTask, bool) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return openAIImagesAsyncTask{}, false
+	}
+	wantID = strings.TrimSpace(wantID)
+	var fallback *openAIImagesAsyncTask
+	for _, candidate := range openAIImagesAsyncTaskCandidates(body) {
+		task := parseOpenAIImagesAsyncTaskCandidate(candidate)
+		if strings.TrimSpace(task.RawString()) == "" {
+			continue
+		}
+		if wantID == "" || task.ID == wantID || task.taskID() == wantID {
+			return task, true
+		}
+		if fallback == nil {
+			cp := task
+			fallback = &cp
+		}
+	}
+	if wantID == "" && fallback != nil {
+		return *fallback, true
+	}
+	return openAIImagesAsyncTask{}, false
+}
+
+func openAIImagesAsyncTaskCandidates(body []byte) [][]byte {
+	candidates := [][]byte{body}
+	for _, path := range []string{"data", "tasks"} {
+		arr := gjson.GetBytes(body, path)
+		if !arr.IsArray() {
+			continue
+		}
+		for _, item := range arr.Array() {
+			if item.IsObject() {
+				candidates = append(candidates, []byte(item.Raw))
+			}
+		}
+	}
+	return candidates
+}
+
+func parseOpenAIImagesAsyncTaskCandidate(raw []byte) openAIImagesAsyncTask {
+	return openAIImagesAsyncTask{
+		ID:      firstNonEmpty(gjson.GetBytes(raw, "id").String(), gjson.GetBytes(raw, "task_id").String()),
+		Status:  gjson.GetBytes(raw, "status").String(),
+		PollURL: gjson.GetBytes(raw, "poll_url").String(),
+		Created: firstPositiveInt64(gjson.GetBytes(raw, "created").Int(), gjson.GetBytes(raw, "created_at").Int()),
+		Raw:     raw,
+	}
+}
+
+func (t openAIImagesAsyncTask) RawString() string {
+	if len(t.Raw) == 0 {
+		return ""
+	}
+	return string(t.Raw)
+}
+
+func normalizeOpenAIImagesAsyncTaskStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func isOpenAIImagesAsyncPendingStatus(status string) bool {
+	switch normalizeOpenAIImagesAsyncTaskStatus(status) {
+	case "pending", "queued", "running", "processing", "in_progress":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAIImagesAsyncSuccessStatus(status string) bool {
+	switch normalizeOpenAIImagesAsyncTaskStatus(status) {
+	case "succeeded", "completed", "success":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAIImagesAsyncFailureStatus(status string) bool {
+	switch normalizeOpenAIImagesAsyncTaskStatus(status) {
+	case "failed", "canceled", "cancelled", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveOpenAIImagesAsyncPollURL(base *url.URL, rawPollURL string, taskID string) (*url.URL, error) {
+	if base == nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("image task poll base url is invalid")
+	}
+	rawPollURL = strings.TrimSpace(rawPollURL)
+	if rawPollURL == "" {
+		if strings.TrimSpace(taskID) == "" {
+			return nil, fmt.Errorf("image task poll url is missing")
+		}
+		rawPollURL = "/api/image-tasks?ids=" + url.QueryEscape(strings.TrimSpace(taskID))
+	}
+	parsed, err := url.Parse(rawPollURL)
+	if err != nil {
+		return nil, fmt.Errorf("image task poll url is invalid: %w", err)
+	}
+	resolved := base.ResolveReference(parsed)
+	if resolved.Scheme != base.Scheme || resolved.Host != base.Host {
+		return nil, fmt.Errorf("image task poll url must use the same upstream host")
+	}
+	return resolved, nil
+}
+
+func buildOpenAIImagesAsyncPollRequest(ctx context.Context, originalReq *http.Request, pollURL *url.URL, replayOriginalRequest bool) (*http.Request, error) {
+	if replayOriginalRequest {
+		if originalReq == nil || originalReq.URL == nil {
+			return nil, fmt.Errorf("image task original request is invalid")
+		}
+		req, err := cloneOpenAIImagesAsyncOriginalRequest(ctx, originalReq)
+		if err != nil {
+			return nil, err
+		}
+		return req, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	if originalReq != nil {
+		req.Header = originalReq.Header.Clone()
+	}
+	req.Header.Del("Content-Type")
+	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
+
+func cloneOpenAIImagesAsyncOriginalRequest(ctx context.Context, originalReq *http.Request) (*http.Request, error) {
+	var body io.Reader
+	if originalReq.GetBody != nil {
+		rc, err := originalReq.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		body = rc
+	} else if originalReq.Body != nil {
+		return nil, fmt.Errorf("image task original request body is not replayable")
+	}
+	req, err := http.NewRequestWithContext(ctx, originalReq.Method, originalReq.URL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header = originalReq.Header.Clone()
+	req.ContentLength = originalReq.ContentLength
+	return req, nil
+}
+
+func shouldReplayOpenAIImagesAsyncOriginalRequest(statusCode int) bool {
+	_, ok := openAIImagesAsyncPostReplayStatuses[statusCode]
+	return ok
+}
+
+func openAIImagesBodyHasOutput(body []byte) bool {
+	images, err := extractImageGenerationOutputs(body)
+	return err == nil && len(images) > 0
+}
+
+func openAIImagesAsyncPollDelay(headers http.Header) time.Duration {
+	if headers != nil {
+		if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
+			if seconds, err := strconv.Atoi(retryAfter); err == nil {
+				return clampOpenAIImagesAsyncPollDelay(time.Duration(seconds) * time.Second)
+			}
+			if at, err := http.ParseTime(retryAfter); err == nil {
+				return clampOpenAIImagesAsyncPollDelay(time.Until(at))
+			}
+		}
+	}
+	if openAIImagesAsyncPollInterval <= 0 {
+		return 2 * time.Second
+	}
+	return openAIImagesAsyncPollInterval
+}
+
+func clampOpenAIImagesAsyncPollDelay(delay time.Duration) time.Duration {
+	if delay < time.Second {
+		return time.Second
+	}
+	if delay > 10*time.Second {
+		return 10 * time.Second
+	}
+	return delay
+}
+
+func normalizeOpenAIImagesAsyncTaskResponse(body []byte, created int64) ([]byte, error) {
+	images, err := extractImageGenerationOutputs(body)
+	if err != nil {
+		return nil, err
+	}
+	if len(images) == 0 {
+		return nil, ErrImageGenerationNoOutput
+	}
+	if created <= 0 {
+		created = firstPositiveInt64(gjson.GetBytes(body, "created").Int(), gjson.GetBytes(body, "created_at").Int(), time.Now().Unix())
+	}
+	payload := map[string]any{
+		"created": created,
+		"data":    make([]map[string]string, 0, len(images)),
+	}
+	for _, img := range images {
+		payload["data"] = append(payload["data"].([]map[string]string), map[string]string{"b64_json": img.Base64})
+	}
+	return json.Marshal(payload)
+}
+
+func openAIImagesAsyncTaskErrorMessage(body []byte) string {
+	for _, path := range []string{"error.message", "error", "message"} {
+		if msg := strings.TrimSpace(gjson.GetBytes(body, path).String()); msg != "" {
+			return sanitizeUpstreamErrorMessage(msg)
+		}
+	}
+	return "image task failed"
+}
+
+func cloneOpenAIImagesResponseWithBody(resp *http.Response, body []byte) *http.Response {
+	if resp == nil {
+		resp = &http.Response{}
+	}
+	cloned := *resp
+	cloned.Body = io.NopCloser(bytes.NewReader(body))
+	cloned.ContentLength = int64(len(body))
+	if cloned.Header == nil {
+		cloned.Header = http.Header{}
+	} else {
+		cloned.Header = cloned.Header.Clone()
+	}
+	if cloned.Header.Get("Content-Type") == "" {
+		cloned.Header.Set("Content-Type", "application/json")
+	}
+	return &cloned
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(resp *http.Response, c *gin.Context) (OpenAIUsage, int, []string, error) {

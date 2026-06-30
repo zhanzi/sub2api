@@ -25,6 +25,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 )
 
 // sseDataPrefix matches SSE data lines with optional whitespace after colon.
@@ -1500,6 +1501,9 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create request")
 	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(payloadBytes)), nil
+	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+authToken)
@@ -1515,9 +1519,21 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readUpstreamResponseBodyLimited(resp.Body, resolveUpstreamResponseReadLimit(s.cfg))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read response: %s", err.Error()))
+	}
+	if resp.StatusCode == http.StatusAccepted {
+		polledResp, pollErr := s.resolveOpenAIImageAccountTestAsyncTask(ctx, resp, body, req, proxyURL, account)
+		_ = resp.Body.Close()
+		if pollErr != nil {
+			return s.sendErrorAndEnd(c, pollErr.Error())
+		}
+		resp = polledResp
+		body, err = readUpstreamResponseBodyLimited(resp.Body, resolveUpstreamResponseReadLimit(s.cfg))
+		if err != nil {
+			return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read response: %s", err.Error()))
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -1554,6 +1570,109 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 	return nil
+}
+
+func (s *AccountTestService) resolveOpenAIImageAccountTestAsyncTask(
+	ctx context.Context,
+	acceptedResp *http.Response,
+	acceptedBody []byte,
+	originalReq *http.Request,
+	proxyURL string,
+	account *Account,
+) (*http.Response, error) {
+	task, ok := parseOpenAIImagesAsyncAcceptedTask(acceptedBody)
+	if !ok {
+		return cloneOpenAIImagesResponseWithBody(acceptedResp, acceptedBody), nil
+	}
+
+	taskID := task.taskID()
+	pollURL, err := resolveOpenAIImagesAsyncPollURL(originalReq.URL, task.PollURL, taskID)
+	if err != nil {
+		return nil, err
+	}
+	nextDelay := openAIImagesAsyncPollDelay(acceptedResp.Header)
+	replayOriginalRequest := false
+	for {
+		if nextDelay > 0 {
+			timer := time.NewTimer(nextDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL, replayOriginalRequest)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.httpUpstream.DoWithTLS(pollReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+		if err != nil {
+			return nil, fmt.Errorf("poll image task failed: %s", sanitizeUpstreamErrorMessage(err.Error()))
+		}
+		if resp == nil {
+			return nil, fmt.Errorf("poll image task failed: empty response")
+		}
+		body, readErr := readUpstreamResponseBodyLimited(resp.Body, resolveUpstreamResponseReadLimit(s.cfg))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode >= 400 {
+			if !replayOriginalRequest && shouldReplayOpenAIImagesAsyncOriginalRequest(resp.StatusCode) {
+				replayOriginalRequest = true
+				nextDelay = openAIImagesAsyncPollDelay(resp.Header)
+				continue
+			}
+			msg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
+			if msg == "" {
+				msg = fmt.Sprintf("poll image task failed: status %d", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("%s", msg)
+		}
+
+		polledTask, ok := selectOpenAIImagesAsyncTask(body, taskID)
+		if !ok {
+			if openAIImagesBodyHasOutput(body) {
+				return cloneOpenAIImagesResponseWithBody(resp, body), nil
+			}
+			polledTask = openAIImagesAsyncTask{
+				ID:      taskID,
+				Status:  strings.TrimSpace(gjson.GetBytes(body, "status").String()),
+				Created: firstPositiveInt64(gjson.GetBytes(body, "created").Int(), gjson.GetBytes(body, "created_at").Int()),
+				Raw:     body,
+			}
+		}
+		status := normalizeOpenAIImagesAsyncTaskStatus(polledTask.Status)
+		switch {
+		case isOpenAIImagesAsyncPendingStatus(status):
+			if poll := strings.TrimSpace(polledTask.PollURL); poll != "" {
+				pollURL, err = resolveOpenAIImagesAsyncPollURL(originalReq.URL, poll, taskID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			nextDelay = openAIImagesAsyncPollDelay(resp.Header)
+			continue
+		case isOpenAIImagesAsyncSuccessStatus(status):
+			body, err := normalizeOpenAIImagesAsyncTaskResponse(polledTask.Raw, polledTask.Created)
+			if err != nil {
+				return nil, err
+			}
+			return cloneOpenAIImagesResponseWithBody(&http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     resp.Header.Clone(),
+			}, body), nil
+		case isOpenAIImagesAsyncFailureStatus(status):
+			return nil, fmt.Errorf("%s", openAIImagesAsyncTaskErrorMessage(polledTask.Raw))
+		default:
+			nextDelay = openAIImagesAsyncPollDelay(resp.Header)
+		}
+	}
 }
 
 // testOpenAIImageOAuth tests OpenAI image generation using an OAuth account via Codex /responses API.

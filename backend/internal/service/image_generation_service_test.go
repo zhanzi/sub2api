@@ -152,6 +152,42 @@ func TestImageGenerationService_PendingTaskIsListedAndCanComplete(t *testing.T) 
 	require.FileExists(t, filepath.Join(dir, completed.Results[0].StoragePath))
 }
 
+func TestImageGenerationService_ExtractsAsyncTaskWrappedOutputs(t *testing.T) {
+	repo := newMemoryImageGenerationRepo()
+	dir := t.TempDir()
+	now := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	svc := NewImageGenerationService(repo, nil, nil, nil, nil, ImageGenerationStorageConfig{
+		BaseDir:       dir,
+		RetentionDays: 7,
+		Now:           func() time.Time { return now },
+	})
+
+	pending, err := svc.CreatePendingTaskFromRequest(context.Background(), 11, ImageGenerationModeGeneration, []byte(`{"model":"gpt-image-2","prompt":"a tiny robot"}`))
+	require.NoError(t, err)
+
+	completed, err := svc.CompletePendingTaskFromResponse(context.Background(), pending.ID, []byte(`{
+		"id":"sync-gen-1",
+		"object":"image.task",
+		"status":"completed",
+		"result":{"url":"data:image/webp;base64,aGVsbG8="},
+		"images":[{"b64_json":"d29ybGQ="}]
+	}`))
+	require.NoError(t, err)
+	require.Equal(t, ImageGenerationStatusSucceeded, completed.Status)
+	require.Len(t, completed.Results, 2)
+	mimeTypes := []string{completed.Results[0].MimeType, completed.Results[1].MimeType}
+	require.Contains(t, mimeTypes, "image/webp")
+	require.Contains(t, mimeTypes, "image/png")
+	require.FileExists(t, filepath.Join(dir, completed.Results[0].StoragePath))
+	require.FileExists(t, filepath.Join(dir, completed.Results[1].StoragePath))
+}
+
+func TestImageGenerationService_IgnoresRemoteHTTPImageURL(t *testing.T) {
+	images, err := extractImageGenerationOutputs([]byte(`{"status":"completed","images":[{"url":"https://files.example.com/image.png"}]}`))
+	require.NoError(t, err)
+	require.Empty(t, images)
+}
+
 func TestImageGenerationService_BootstrapViewListsOnlyImageCapableUserKeys(t *testing.T) {
 	repo := newMemoryImageGenerationRepo()
 	groupID := int64(10)

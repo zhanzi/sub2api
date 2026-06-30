@@ -829,23 +829,78 @@ func parsePositiveIntSetting(raw string, fallback int) int {
 }
 
 func extractImageGenerationOutputs(body []byte) ([]ImageGenerationOutputImage, error) {
-	var payload struct {
-		Data []struct {
-			B64JSON string `json:"b64_json"`
-			URL     string `json:"url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	var decoded any
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, err
 	}
-	out := make([]ImageGenerationOutputImage, 0, len(payload.Data))
-	for _, item := range payload.Data {
-		if strings.TrimSpace(item.B64JSON) == "" {
-			continue
-		}
-		out = append(out, ImageGenerationOutputImage{MimeType: "image/png", Base64: item.B64JSON})
-	}
+	var out []ImageGenerationOutputImage
+	walkImageGenerationOutputs(decoded, &out)
 	return out, nil
+}
+
+func walkImageGenerationOutputs(node any, out *[]ImageGenerationOutputImage) {
+	switch value := node.(type) {
+	case map[string]any:
+		if img, ok := imageGenerationOutputFromMap(value); ok {
+			*out = append(*out, img)
+		}
+		for _, child := range value {
+			walkImageGenerationOutputs(child, out)
+		}
+	case []any:
+		for _, child := range value {
+			walkImageGenerationOutputs(child, out)
+		}
+	}
+}
+
+func imageGenerationOutputFromMap(value map[string]any) (ImageGenerationOutputImage, bool) {
+	if value == nil {
+		return ImageGenerationOutputImage{}, false
+	}
+	mimeType := firstNonEmpty(
+		stringValue(value["mime_type"]),
+		stringValue(value["mimeType"]),
+		stringValue(value["content_type"]),
+	)
+	if b64 := strings.TrimSpace(stringValue(value["b64_json"])); b64 != "" {
+		return ImageGenerationOutputImage{MimeType: mimeType, Base64: b64}, true
+	}
+	if b64 := strings.TrimSpace(stringValue(value["base64"])); b64 != "" {
+		return ImageGenerationOutputImage{MimeType: mimeType, Base64: b64}, true
+	}
+	if b64 := strings.TrimSpace(stringValue(value["image_base64"])); b64 != "" {
+		return ImageGenerationOutputImage{MimeType: mimeType, Base64: b64}, true
+	}
+	urlValue := strings.TrimSpace(stringValue(value["url"]))
+	if urlValue == "" {
+		urlValue = strings.TrimSpace(stringValue(value["image_url"]))
+	}
+	if strings.HasPrefix(strings.ToLower(urlValue), "data:image/") {
+		if parsedMime := imageGenerationDataURLMimeType(urlValue); parsedMime != "" {
+			mimeType = parsedMime
+		}
+		return ImageGenerationOutputImage{MimeType: mimeType, Base64: urlValue}, true
+	}
+	return ImageGenerationOutputImage{}, false
+}
+
+func stringValue(value any) string {
+	if s, ok := value.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func imageGenerationDataURLMimeType(value string) string {
+	if !strings.HasPrefix(strings.ToLower(value), "data:") {
+		return ""
+	}
+	idx := strings.Index(value, ";")
+	if idx < 5 {
+		return ""
+	}
+	return strings.TrimSpace(value[5:idx])
 }
 
 type memoryImageGenerationRepo struct {
