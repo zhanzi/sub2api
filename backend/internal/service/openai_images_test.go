@@ -1046,7 +1046,7 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyPollsAcceptedImageTask(t *testi
 	require.Empty(t, upstream.requests[1].Header.Get("Content-Type"))
 }
 
-func TestOpenAIGatewayServiceForwardImages_APIKeyReplaysOriginalRequestWhenPollURLNotFound(t *testing.T) {
+func TestOpenAIGatewayServiceForwardImages_APIKeyDoesNotReplayOriginalRequestWhenPollURLNotFound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousInterval := openAIImagesAsyncPollInterval
 	openAIImagesAsyncPollInterval = time.Millisecond
@@ -1070,16 +1070,6 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyReplaysOriginalRequestWhenPollU
 			Header:     http.Header{"Content-Type": []string{"text/plain"}},
 			Body:       io.NopCloser(strings.NewReader(`404 page not found`)),
 		},
-		{
-			StatusCode: http.StatusAccepted,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"sync-gen-1","object":"image.task","status":"pending","task_id":"sync-gen-1","poll_url":"/api/image-tasks?ids=sync-gen-1","created":1710000001}`)),
-		},
-		{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Request-Id": []string{"req_img_replay"}},
-			Body:       io.NopCloser(strings.NewReader(`{"created":1710000003,"data":[{"b64_json":"aGVsbG8="}]}`)),
-		},
 	}}
 	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
 	parsed, err := svc.ParseOpenAIImagesRequest(c, body)
@@ -1097,23 +1087,12 @@ func TestOpenAIGatewayServiceForwardImages_APIKeyReplaysOriginalRequestWhenPollU
 	}
 
 	result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, 1, result.ImageCount)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "aGVsbG8=", gjson.Get(rec.Body.String(), "data.0.b64_json").String())
-	require.Len(t, upstream.requests, 4)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "poll image task failed: status 404")
+	require.Len(t, upstream.requests, 2)
 	require.Equal(t, http.MethodPost, upstream.requests[0].Method)
 	require.Equal(t, http.MethodGet, upstream.requests[1].Method)
-	require.Equal(t, http.MethodPost, upstream.requests[2].Method)
-	require.Equal(t, http.MethodPost, upstream.requests[3].Method)
-	require.Equal(t, upstream.requests[0].URL.String(), upstream.requests[2].URL.String())
-	require.Equal(t, upstream.requests[0].URL.String(), upstream.requests[3].URL.String())
-	replayedBody, err := io.ReadAll(upstream.requests[2].Body)
-	require.NoError(t, err)
-	require.JSONEq(t, string(body), string(replayedBody))
-	require.Equal(t, "application/json", upstream.requests[2].Header.Get("Content-Type"))
-	require.Equal(t, "Bearer test-api-key", upstream.requests[2].Header.Get("Authorization"))
 }
 
 func TestOpenAIGatewayServiceForwardImages_APIKeyRejectsCrossHostPollURL(t *testing.T) {

@@ -53,7 +53,7 @@ func TestAccountTestService_OpenAIImageOAuthHandlesOutputItemDoneFallback(t *tes
 	require.Contains(t, rec.Body.String(), "\"success\":true")
 }
 
-func TestAccountTestService_OpenAIImageAPIKeyReplaysOriginalRequestWhenPollURLNotFound(t *testing.T) {
+func TestAccountTestService_OpenAIImageAPIKeyDoesNotReplayOriginalRequestWhenPollURLNotFound(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousInterval := openAIImagesAsyncPollInterval
 	openAIImagesAsyncPollInterval = time.Millisecond
@@ -74,16 +74,6 @@ func TestAccountTestService_OpenAIImageAPIKeyReplaysOriginalRequestWhenPollURLNo
 			Header:     http.Header{"Content-Type": []string{"text/plain"}},
 			Body:       io.NopCloser(strings.NewReader(`404 page not found`)),
 		},
-		{
-			StatusCode: http.StatusAccepted,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"sync-gen-1","object":"image.task","status":"pending","task_id":"sync-gen-1","poll_url":"/api/image-tasks?ids=sync-gen-1","created":1710000001}`)),
-		},
-		{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"data":[{"b64_json":"aGVsbG8=","revised_prompt":"draw a cat"}]}`)),
-		},
 	}}
 	svc := &AccountTestService{
 		httpUpstream: upstream,
@@ -101,15 +91,12 @@ func TestAccountTestService_OpenAIImageAPIKeyReplaysOriginalRequestWhenPollURLNo
 	}
 
 	err := svc.testOpenAIImageAPIKey(c, context.Background(), account, "gpt-image-2", "draw a cat")
-	require.NoError(t, err)
-	require.Len(t, upstream.requests, 4)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "poll image task failed: status 404")
+	require.Len(t, upstream.requests, 2)
 	require.Equal(t, http.MethodPost, upstream.requests[0].Method)
 	require.Equal(t, http.MethodGet, upstream.requests[1].Method)
-	require.Equal(t, http.MethodPost, upstream.requests[2].Method)
-	require.Equal(t, http.MethodPost, upstream.requests[3].Method)
-	require.Equal(t, "https://image-upstream.example/v1/images/generations", upstream.requests[2].URL.String())
-	require.Contains(t, rec.Body.String(), "data:image/png;base64,aGVsbG8=")
-	require.Contains(t, rec.Body.String(), "\"success\":true")
+	require.Contains(t, rec.Body.String(), "poll image task failed: status 404")
 }
 
 func TestAccountTestService_OpenAIImageAPIKeyUsesConfiguredV1BaseURL(t *testing.T) {

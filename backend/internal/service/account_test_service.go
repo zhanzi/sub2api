@@ -1592,9 +1592,6 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create request")
 	}
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(payloadBytes)), nil
-	}
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+authToken)
@@ -1682,7 +1679,6 @@ func (s *AccountTestService) resolveOpenAIImageAccountTestAsyncTask(
 		return nil, err
 	}
 	nextDelay := openAIImagesAsyncPollDelay(acceptedResp.Header)
-	replayOriginalRequest := false
 	for {
 		if nextDelay > 0 {
 			timer := time.NewTimer(nextDelay)
@@ -1696,7 +1692,7 @@ func (s *AccountTestService) resolveOpenAIImageAccountTestAsyncTask(
 			}
 		}
 
-		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL, replayOriginalRequest)
+		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL)
 		if err != nil {
 			return nil, err
 		}
@@ -1713,11 +1709,6 @@ func (s *AccountTestService) resolveOpenAIImageAccountTestAsyncTask(
 			return nil, readErr
 		}
 		if resp.StatusCode >= 400 {
-			if !replayOriginalRequest && shouldReplayOpenAIImagesAsyncOriginalRequest(resp.StatusCode) {
-				replayOriginalRequest = true
-				nextDelay = openAIImagesAsyncPollDelay(resp.Header)
-				continue
-			}
 			msg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(body))
 			if msg == "" {
 				msg = fmt.Sprintf("poll image task failed: status %d", resp.StatusCode)

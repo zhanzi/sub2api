@@ -44,12 +44,6 @@ const (
 )
 
 var openAIImagesAsyncPollInterval = 2 * time.Second
-var openAIImagesAsyncPostReplayStatuses = map[int]struct{}{
-	http.StatusNotFound:          {},
-	http.StatusMethodNotAllowed:  {},
-	http.StatusNotImplemented:    {},
-	http.StatusPermanentRedirect: {},
-}
 
 type OpenAIImagesCapability string
 
@@ -909,7 +903,6 @@ func (s *OpenAIGatewayService) resolveOpenAIImagesAsyncTask(
 		return nil, err
 	}
 	nextDelay := openAIImagesAsyncPollDelay(resp.Header)
-	replayOriginalRequest := false
 	for {
 		if nextDelay > 0 {
 			timer := time.NewTimer(nextDelay)
@@ -923,7 +916,7 @@ func (s *OpenAIGatewayService) resolveOpenAIImagesAsyncTask(
 			}
 		}
 
-		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL, replayOriginalRequest)
+		pollReq, err := buildOpenAIImagesAsyncPollRequest(ctx, originalReq, pollURL)
 		if err != nil {
 			return nil, err
 		}
@@ -942,11 +935,6 @@ func (s *OpenAIGatewayService) resolveOpenAIImagesAsyncTask(
 			return nil, readErr
 		}
 		if pollResp.StatusCode >= 400 {
-			if !replayOriginalRequest && shouldReplayOpenAIImagesAsyncOriginalRequest(pollResp.StatusCode) {
-				replayOriginalRequest = true
-				nextDelay = openAIImagesAsyncPollDelay(pollResp.Header)
-				continue
-			}
 			msg := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(pollBody))
 			if msg == "" {
 				msg = fmt.Sprintf("poll image task failed: status %d", pollResp.StatusCode)
@@ -1126,17 +1114,7 @@ func resolveOpenAIImagesAsyncPollURL(base *url.URL, rawPollURL string, taskID st
 	return resolved, nil
 }
 
-func buildOpenAIImagesAsyncPollRequest(ctx context.Context, originalReq *http.Request, pollURL *url.URL, replayOriginalRequest bool) (*http.Request, error) {
-	if replayOriginalRequest {
-		if originalReq == nil || originalReq.URL == nil {
-			return nil, fmt.Errorf("image task original request is invalid")
-		}
-		req, err := cloneOpenAIImagesAsyncOriginalRequest(ctx, originalReq)
-		if err != nil {
-			return nil, err
-		}
-		return req, nil
-	}
+func buildOpenAIImagesAsyncPollRequest(ctx context.Context, originalReq *http.Request, pollURL *url.URL) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -1148,32 +1126,6 @@ func buildOpenAIImagesAsyncPollRequest(ctx context.Context, originalReq *http.Re
 	req.Header.Del("Content-Type")
 	req.Header.Set("Accept", "application/json")
 	return req, nil
-}
-
-func cloneOpenAIImagesAsyncOriginalRequest(ctx context.Context, originalReq *http.Request) (*http.Request, error) {
-	var body io.Reader
-	if originalReq.GetBody != nil {
-		rc, err := originalReq.GetBody()
-		if err != nil {
-			return nil, err
-		}
-		body = rc
-	} else if originalReq.Body != nil {
-		return nil, fmt.Errorf("image task original request body is not replayable")
-	}
-	req, err := http.NewRequestWithContext(ctx, originalReq.Method, originalReq.URL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-	req.Header = originalReq.Header.Clone()
-	req.ContentLength = originalReq.ContentLength
-	return req, nil
-}
-
-func shouldReplayOpenAIImagesAsyncOriginalRequest(statusCode int) bool {
-	_, ok := openAIImagesAsyncPostReplayStatuses[statusCode]
-	return ok
 }
 
 func openAIImagesBodyHasOutput(body []byte) bool {
