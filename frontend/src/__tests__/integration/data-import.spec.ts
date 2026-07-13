@@ -228,6 +228,14 @@ describe('ImportDataModal', () => {
     })
   })
 
+  it('renders the JSON placeholder without passing it through i18n', async () => {
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+
+    expect(textarea.attributes('placeholder')).toContain('"exported_at": "..."')
+    expect(textarea.attributes('placeholder')).toContain('"accounts": []')
+  })
+
   it('merges an array of complete export objects pasted as JSON', async () => {
     const { adminAPI } = await import('@/api/admin')
     vi.mocked(adminAPI.accounts.importData).mockResolvedValue({

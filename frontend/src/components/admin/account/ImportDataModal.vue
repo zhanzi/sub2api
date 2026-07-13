@@ -94,7 +94,7 @@
           data-testid="import-json-textarea"
           rows="12"
           class="input min-h-56 w-full resize-y font-mono text-xs leading-5"
-          :placeholder="t('admin.accounts.dataImportPastePlaceholder')"
+          :placeholder="pastePlaceholder"
           autocomplete="off"
           spellcheck="false"
           @input="result = null"
@@ -291,6 +291,15 @@ const readFileAsText = async (sourceFile: File): Promise<string> => {
 
 const SUPPORTED_DATA_TYPES = ['sub2api-data', 'sub2api-bundle']
 const SUPPORTED_DATA_VERSION = 1
+const pastePlaceholder = JSON.stringify(
+  {
+    exported_at: '...',
+    proxies: [],
+    accounts: []
+  },
+  null,
+  2
+)
 
 class DataImportInputError extends Error {
   constructor(
