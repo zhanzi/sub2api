@@ -35,7 +35,6 @@ export default {
       dataImportModePaste: '粘贴 JSON',
       dataImportFile: '数据文件',
       dataImportPasteLabel: 'JSON 内容',
-      dataImportPastePlaceholder: '{\n  "exported_at": "...",\n  "proxies": [],\n  "accounts": []\n}',
       dataImportPasteHint: '支持粘贴一个完整导出对象，或由多个完整导出对象组成的 JSON 数组。',
       dataImportPasteRequired: '请粘贴 JSON 内容',
       dataImportPasteParseFailed: '粘贴内容不是有效的 JSON',

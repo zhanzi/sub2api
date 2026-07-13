@@ -35,7 +35,6 @@ export default {
       dataImportModePaste: 'Paste JSON',
       dataImportFile: 'Data file',
       dataImportPasteLabel: 'JSON content',
-      dataImportPastePlaceholder: '{\n  "exported_at": "...",\n  "proxies": [],\n  "accounts": []\n}',
       dataImportPasteHint: 'Paste one complete export object or a JSON array of complete export objects.',
       dataImportPasteRequired: 'Please paste JSON content',
       dataImportPasteParseFailed: 'The pasted content is not valid JSON',
