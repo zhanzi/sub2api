@@ -24,7 +24,8 @@ vi.mock('@/api/admin', () => ({
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
-    t: (key: string) => key
+    t: (key: string, params?: Record<string, unknown>) =>
+      params ? `${key}:${JSON.stringify(params)}` : key
   })
 }))
 
@@ -51,6 +52,24 @@ const setInputFiles = (element: Element, files: File[]) => {
     value: files,
     configurable: true
   })
+}
+
+const makeDataPayload = (
+  accountName: string,
+  options?: {
+    proxies?: Array<Record<string, unknown>>
+    skippedShadows?: number
+  }
+) => ({
+  exported_at: '2026-07-05T00:00:00Z',
+  proxies: options?.proxies || [],
+  accounts: [{ name: accountName }],
+  skipped_shadows: options?.skippedShadows
+})
+
+const selectPasteMode = async (wrapper: ReturnType<typeof mountModal>) => {
+  await wrapper.get('[data-testid="import-mode-paste"]').trigger('click')
+  return wrapper.get('[data-testid="import-json-textarea"]')
 }
 
 describe('ImportDataModal', () => {
@@ -80,7 +99,10 @@ describe('ImportDataModal', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportParseFailedFile')
+    expect(showError).toHaveBeenCalledWith(
+      expect.stringContaining('admin.accounts.dataImportParseFailedFile')
+    )
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('data.json'))
     expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
   })
 
@@ -95,7 +117,10 @@ describe('ImportDataModal', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportInvalidFile')
+    expect(showError).toHaveBeenCalledWith(
+      expect.stringContaining('admin.accounts.dataImportInvalidFile')
+    )
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('random.json'))
     expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
   })
 
@@ -172,7 +197,176 @@ describe('ImportDataModal', () => {
       }),
       skip_default_group_bind: true
     })
-    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
+    expect(showSuccess).toHaveBeenCalledWith(
+      expect.stringContaining('admin.accounts.dataImportSuccess')
+    )
+  })
+
+  it('imports one complete export object pasted as JSON', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 1,
+      account_failed: 0
+    })
+
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue(JSON.stringify(makeDataPayload('pasted-account')))
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        accounts: [{ name: 'pasted-account' }],
+        proxies: []
+      }),
+      skip_default_group_bind: true
+    })
+  })
+
+  it('merges an array of complete export objects pasted as JSON', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 1,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 2,
+      account_failed: 0
+    })
+
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue(
+      JSON.stringify([
+        makeDataPayload('first', { skippedShadows: 1 }),
+        makeDataPayload('second', {
+          proxies: [{ proxy_key: 'proxy-1' }],
+          skippedShadows: 2
+        })
+      ])
+    )
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        accounts: [{ name: 'first' }, { name: 'second' }],
+        proxies: [{ proxy_key: 'proxy-1' }],
+        skipped_shadows: 3
+      }),
+      skip_default_group_bind: true
+    })
+  })
+
+  it('rejects empty pasted content before sending a request', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    await selectPasteMode(wrapper)
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportPasteRequired')
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
+  it('rejects invalid pasted JSON before sending a request', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue('{ invalid json')
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportPasteParseFailed')
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
+  it('rejects an empty pasted JSON array', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue('[]')
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportPasteEmptyArray')
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
+  it('rejects a pasted array of account objects and reports the item index', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue(
+      JSON.stringify([
+        {
+          name: 'account-only',
+          platform: 'openai',
+          type: 'oauth',
+          credentials: {}
+        }
+      ])
+    )
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith(
+      expect.stringContaining('admin.accounts.dataImportPasteInvalidItem')
+    )
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('"index":1'))
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
+  it('reports the invalid item index in a pasted export array', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const wrapper = mountModal()
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue(JSON.stringify([makeDataPayload('valid'), { accounts: [] }]))
+
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining('"index":2'))
+    expect(adminAPI.accounts.importData).not.toHaveBeenCalled()
+  })
+
+  it('submits only the active input mode', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 1,
+      account_failed: 0
+    })
+
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    setInputFiles(input.element, [
+      makeJsonFile('file.json', JSON.stringify(makeDataPayload('file-account')))
+    ])
+    await input.trigger('change')
+
+    const textarea = await selectPasteMode(wrapper)
+    await textarea.setValue(JSON.stringify(makeDataPayload('paste-account')))
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(adminAPI.accounts.importData).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        accounts: [{ name: 'paste-account' }]
+      }),
+      skip_default_group_bind: true
+    })
   })
 
   it('部分成功时关闭弹窗仍通知父组件刷新', async () => {
@@ -202,7 +396,9 @@ describe('ImportDataModal', () => {
     await wrapper.find('form').trigger('submit')
     await flushPromises()
 
-    expect(showError).toHaveBeenCalledWith('admin.accounts.dataImportCompletedWithErrors')
+    expect(showError).toHaveBeenCalledWith(
+      expect.stringContaining('admin.accounts.dataImportCompletedWithErrors')
+    )
     expect(wrapper.emitted('imported')).toBeUndefined()
 
     // 第二个 btn-secondary 是 footer 的取消按钮(第一个是选择文件)

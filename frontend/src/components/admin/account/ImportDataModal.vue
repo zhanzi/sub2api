@@ -16,7 +16,40 @@
         {{ t('admin.accounts.dataImportWarning') }}
       </div>
 
-      <div>
+      <div
+        class="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-dark-800"
+        role="tablist"
+        :aria-label="t('admin.accounts.dataImportMode')"
+      >
+        <button
+          type="button"
+          role="tab"
+          data-testid="import-mode-files"
+          class="rounded-md px-3 py-2 text-sm font-medium transition-colors"
+          :class="inputMode === 'files'
+            ? 'bg-white text-gray-900 shadow-sm dark:bg-dark-700 dark:text-white'
+            : 'text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200'"
+          :aria-selected="inputMode === 'files'"
+          @click="setInputMode('files')"
+        >
+          {{ t('admin.accounts.dataImportModeFiles') }}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          data-testid="import-mode-paste"
+          class="rounded-md px-3 py-2 text-sm font-medium transition-colors"
+          :class="inputMode === 'paste'
+            ? 'bg-white text-gray-900 shadow-sm dark:bg-dark-700 dark:text-white'
+            : 'text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200'"
+          :aria-selected="inputMode === 'paste'"
+          @click="setInputMode('paste')"
+        >
+          {{ t('admin.accounts.dataImportModePaste') }}
+        </button>
+      </div>
+
+      <div v-if="inputMode === 'files'">
         <label class="input-label">{{ t('admin.accounts.dataImportFile') }}</label>
         <div
           class="flex items-center justify-between gap-3 rounded-lg border border-dashed px-4 py-3 transition-colors"
@@ -49,6 +82,26 @@
           multiple
           @change="handleFileChange"
         />
+      </div>
+
+      <div v-else>
+        <label for="account-import-json" class="input-label">
+          {{ t('admin.accounts.dataImportPasteLabel') }}
+        </label>
+        <textarea
+          id="account-import-json"
+          v-model="pastedContent"
+          data-testid="import-json-textarea"
+          rows="12"
+          class="input min-h-56 w-full resize-y font-mono text-xs leading-5"
+          :placeholder="t('admin.accounts.dataImportPastePlaceholder')"
+          autocomplete="off"
+          spellcheck="false"
+          @input="result = null"
+        ></textarea>
+        <p class="mt-1.5 text-xs text-gray-500 dark:text-dark-400">
+          {{ t('admin.accounts.dataImportPasteHint') }}
+        </p>
       </div>
 
       <div
@@ -103,6 +156,8 @@ import { adminAPI } from '@/api/admin'
 import { useAppStore } from '@/stores/app'
 import type { AdminDataImportResult, AdminDataPayload } from '@/types'
 
+type InputMode = 'files' | 'paste'
+
 interface Props {
   show: boolean
 }
@@ -119,7 +174,9 @@ const { t } = useI18n()
 const appStore = useAppStore()
 
 const importing = ref(false)
+const inputMode = ref<InputMode>('files')
 const files = ref<File[]>([])
+const pastedContent = ref('')
 const dragDepth = ref(0)
 const dragActive = computed(() => dragDepth.value > 0)
 const hasCreatedData = ref(false)
@@ -139,7 +196,9 @@ watch(
   () => props.show,
   (open) => {
     if (open) {
+      inputMode.value = 'files'
       files.value = []
+      pastedContent.value = ''
       dragDepth.value = 0
       hasCreatedData.value = false
       result.value = null
@@ -152,6 +211,12 @@ watch(
 
 const openFilePicker = () => {
   fileInput.value?.click()
+}
+
+const setInputMode = (mode: InputMode) => {
+  if (importing.value || inputMode.value === mode) return
+  inputMode.value = mode
+  result.value = null
 }
 
 const handleFileChange = (event: Event) => {
@@ -227,6 +292,15 @@ const readFileAsText = async (sourceFile: File): Promise<string> => {
 const SUPPORTED_DATA_TYPES = ['sub2api-data', 'sub2api-bundle']
 const SUPPORTED_DATA_VERSION = 1
 
+class DataImportInputError extends Error {
+  constructor(
+    readonly key: string,
+    readonly params?: Record<string, unknown>
+  ) {
+    super(key)
+  }
+}
+
 // 与后端 validateDataHeader 对齐:合并前逐文件校验,避免坏文件混入合并 payload 后
 // 报错无法定位来源,或绕过后端本会对单文件做的 type/version 检查。
 const isValidDataPayload = (payload: unknown): payload is AdminDataPayload => {
@@ -266,31 +340,78 @@ const mergeDataPayloads = (payloads: AdminDataPayload[]): AdminDataPayload => {
   }
 }
 
-const handleImport = async () => {
-  if (files.value.length === 0) {
-    appStore.showError(t('admin.accounts.dataImportSelectFile'))
-    return
+const parseDataPayloads = (
+  content: string,
+  source: { kind: 'file'; name: string } | { kind: 'paste' }
+): AdminDataPayload[] => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    if (source.kind === 'file') {
+      throw new DataImportInputError('admin.accounts.dataImportParseFailedFile', {
+        name: source.name
+      })
+    }
+    throw new DataImportInputError('admin.accounts.dataImportPasteParseFailed')
   }
 
+  if (source.kind === 'file') {
+    if (!isValidDataPayload(parsed)) {
+      throw new DataImportInputError('admin.accounts.dataImportInvalidFile', {
+        name: source.name
+      })
+    }
+    return [parsed]
+  }
+
+  const values = Array.isArray(parsed) ? parsed : [parsed]
+  if (values.length === 0) {
+    throw new DataImportInputError('admin.accounts.dataImportPasteEmptyArray')
+  }
+
+  return values.map((value, index) => {
+    if (!isValidDataPayload(value)) {
+      if (Array.isArray(parsed)) {
+        throw new DataImportInputError('admin.accounts.dataImportPasteInvalidItem', {
+          index: index + 1
+        })
+      }
+      throw new DataImportInputError('admin.accounts.dataImportPasteInvalidContent')
+    }
+    return value
+  })
+}
+
+const collectDataPayloads = async (): Promise<AdminDataPayload[]> => {
+  if (inputMode.value === 'paste') {
+    const content = pastedContent.value.trim()
+    if (!content) {
+      throw new DataImportInputError('admin.accounts.dataImportPasteRequired')
+    }
+    return parseDataPayloads(content, { kind: 'paste' })
+  }
+
+  if (files.value.length === 0) {
+    throw new DataImportInputError('admin.accounts.dataImportSelectFile')
+  }
+
+  const payloads: AdminDataPayload[] = []
+  for (const sourceFile of files.value) {
+    payloads.push(
+      ...parseDataPayloads(await readFileAsText(sourceFile), {
+        kind: 'file',
+        name: sourceFile.name
+      })
+    )
+  }
+  return payloads
+}
+
+const handleImport = async () => {
   importing.value = true
   try {
-    const dataPayloads: AdminDataPayload[] = []
-    for (const sourceFile of files.value) {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(await readFileAsText(sourceFile))
-      } catch {
-        appStore.showError(
-          t('admin.accounts.dataImportParseFailedFile', { name: sourceFile.name })
-        )
-        return
-      }
-      if (!isValidDataPayload(parsed)) {
-        appStore.showError(t('admin.accounts.dataImportInvalidFile', { name: sourceFile.name }))
-        return
-      }
-      dataPayloads.push(parsed)
-    }
+    const dataPayloads = await collectDataPayloads()
     const dataPayload = mergeDataPayloads(dataPayloads)
 
     const res = await adminAPI.accounts.importData({
@@ -318,6 +439,10 @@ const handleImport = async () => {
       emit('imported')
     }
   } catch (error: any) {
+    if (error instanceof DataImportInputError) {
+      appStore.showError(error.params ? t(error.key, error.params) : t(error.key))
+      return
+    }
     appStore.showError(error?.message || t('admin.accounts.dataImportFailed'))
   } finally {
     importing.value = false
