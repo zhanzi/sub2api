@@ -80,6 +80,29 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
+	firstOutputTimeout := s.openAIFirstOutputTimeout()
+	var firstOutputTimer *time.Timer
+	if firstOutputTimeout > 0 {
+		firstOutputTimer = time.NewTimer(firstOutputTimeout)
+		defer firstOutputTimer.Stop()
+	}
+	var firstOutputCh <-chan time.Time
+	if firstOutputTimer != nil {
+		firstOutputCh = firstOutputTimer.C
+	}
+	stopFirstOutputTimer := func() {
+		if firstOutputTimer == nil || firstOutputCh == nil {
+			return
+		}
+		if !firstOutputTimer.Stop() {
+			select {
+			case <-firstOutputTimer.C:
+			default:
+			}
+		}
+		firstOutputCh = nil
+	}
+
 	streamInterval := time.Duration(0)
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
@@ -125,6 +148,41 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	clientOutputStarted := false
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamEarlyErr error
+	pendingLines := make([]string, 0, 8)
+	pendingBytes := 0
+	appendPendingLine := func(line string) {
+		lineBytes := len(line) + 1
+		if pendingBytes+lineBytes > openAIMaxPendingPreambleBytes {
+			return
+		}
+		pendingLines = append(pendingLines, line)
+		pendingBytes += lineBytes
+	}
+	writeBufferedLine := func(line string) bool {
+		if _, err := bufferedWriter.WriteString(line); err != nil {
+			clientDisconnected = true
+			logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
+			return false
+		}
+		if _, err := bufferedWriter.WriteString("\n"); err != nil {
+			clientDisconnected = true
+			logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
+			return false
+		}
+		return true
+	}
+	writePendingLines := func() bool {
+		for _, pending := range pendingLines {
+			if !writeBufferedLine(pending) {
+				pendingLines = pendingLines[:0]
+				pendingBytes = 0
+				return false
+			}
+		}
+		pendingLines = pendingLines[:0]
+		pendingBytes = 0
+		return true
+	}
 	sendErrorEvent := func(reason string) {
 		if errorEventSent || clientDisconnected {
 			return
@@ -336,21 +394,27 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
+			waitingForFirstOutput := firstOutputCh != nil
+			if startsClientOutput {
+				stopFirstOutputTimer()
+			}
+			s.parseSSEUsageBytes(dataBytes, usage)
 
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected {
+				if waitingForFirstOutput && !clientOutputStarted && !startsClientOutput {
+					appendPendingLine(line)
+					return
+				}
+				if !clientOutputStarted && len(pendingLines) > 0 && !writePendingLines() {
+					return
+				}
 				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
 				if firstTokenMs == nil && startsClientOutput {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。
 					shouldFlush = true
 				}
-				if _, err := bufferedWriter.WriteString(line); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-				} else if _, err := bufferedWriter.WriteString("\n"); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-				} else if shouldFlush {
+				if writeBufferedLine(line) && shouldFlush {
 					if err := flushBuffered(); err != nil {
 						clientDisconnected = true
 						logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
@@ -366,19 +430,16 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}
-			s.parseSSEUsageBytes(dataBytes, usage)
 			return
 		}
 
 		// Forward non-data lines as-is
 		if !clientDisconnected {
-			if _, err := bufferedWriter.WriteString(line); err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-			} else if _, err := bufferedWriter.WriteString("\n"); err != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-			} else if queueDrained && clientOutputStarted {
+			if firstOutputCh != nil && !clientOutputStarted {
+				appendPendingLine(line)
+				return
+			}
+			if writeBufferedLine(line) && queueDrained && clientOutputStarted {
 				if err := flushBuffered(); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
@@ -391,7 +452,7 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	}
 
 	// 无超时/无 keepalive 的常见路径走同步扫描，减少 goroutine 与 channel 开销。
-	if streamInterval <= 0 && keepaliveInterval <= 0 {
+	if streamInterval <= 0 && keepaliveInterval <= 0 && firstOutputTimeout <= 0 {
 		defer putSSEScannerBuf64K(scanBuf)
 		for scanner.Scan() {
 			processSSELine(scanner.Text(), true)
@@ -421,13 +482,18 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 		}
 	}
 	var lastReadAt int64
+	var firstOutputRead int32
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	go func(scanBuf *sseScannerBuf64K) {
 		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
 		for scanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
+			line := scanner.Text()
+			if atomic.LoadInt32(&firstOutputRead) == 0 && openAIStreamLineStopsFirstOutputTimer(line) {
+				atomic.StoreInt32(&firstOutputRead, 1)
+			}
+			if !sendEvent(scanEvent{line: line}) {
 				return
 			}
 		}
@@ -467,8 +533,26 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 			sendErrorEvent("stream_timeout")
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
+		case <-firstOutputCh:
+			if atomic.LoadInt32(&firstOutputRead) != 0 {
+				stopFirstOutputTimer()
+				continue
+			}
+			_ = resp.Body.Close()
+			return resultWithUsage(), s.handleOpenAIFirstOutputTimeout(
+				c,
+				account,
+				false,
+				upstreamRequestID,
+			)
+
 		case <-keepaliveCh:
 			if clientDisconnected {
+				continue
+			}
+			// Keep the HTTP status uncommitted until real client output starts so
+			// a first-output timeout can still return a protocol-correct 504 JSON.
+			if firstOutputCh != nil && !clientOutputStarted {
 				continue
 			}
 			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
