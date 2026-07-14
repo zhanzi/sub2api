@@ -179,8 +179,23 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	upstreamStart := time.Now()
+	var firstOutputHeaderGuard *openAIFirstOutputHeaderGuard
+	if reqStream {
+		guardedCtx, guard := s.guardOpenAIFirstOutputHeaderWait(upstreamReq.Context(), startTime)
+		if guard != nil {
+			upstreamReq = upstreamReq.WithContext(guardedCtx)
+			firstOutputHeaderGuard = guard
+			defer firstOutputHeaderGuard.close()
+		}
+	}
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+	if firstOutputHeaderGuard != nil && firstOutputHeaderGuard.stopHeaderWait() {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, s.handleOpenAIFirstOutputTimeout(c, account, true, "")
+	}
 	if err != nil {
 		// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 		// a failover so the handler switches to a healthy account, and temporarily
@@ -896,9 +911,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
-	firstOutputTimeout := s.openAIFirstOutputTimeout()
+	firstOutputTimeout, firstOutputTimeoutEnabled := s.openAIFirstOutputRemaining(startTime)
 	var firstOutputTimer *time.Timer
-	if firstOutputTimeout > 0 {
+	if firstOutputTimeoutEnabled {
 		firstOutputTimer = time.NewTimer(firstOutputTimeout)
 		defer firstOutputTimer.Stop()
 	}

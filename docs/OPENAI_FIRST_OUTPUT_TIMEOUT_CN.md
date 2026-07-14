@@ -11,7 +11,9 @@
 - 默认值：`300` 秒
 - 有效范围：`30-1800` 秒；`0` 表示禁用
 
-计时从收到上游响应头并进入 HTTP SSE 处理开始。现有 `openAIStreamDataStartsClientOutput` 语义认定的首个有效输出会停止计时；`response.failed` 和 `[DONE]` 也会结束等待，但不会记录为首 token。前导事件、空行、SSE 注释和心跳不会延长等待。
+计时从本次 OpenAI/Codex 转发开始。等待上游响应头和等待首个有效 SSE 输出共用同一份总预算，不会串联叠加。现有 `openAIStreamDataStartsClientOutput` 语义认定的首个有效输出会停止计时；`response.failed` 和 `[DONE]` 也会结束等待，但不会记录为首 token。前导事件、空行、SSE 注释和心跳不会延长等待。
+
+Compose 的 `.env` 只参与变量替换，不会自动把新增变量注入容器。部署文件的 `environment` 必须包含 `GATEWAY_OPENAI_FIRST_OUTPUT_TIMEOUT`，修改后需要重建容器，并用 `docker exec sub2api printenv` 确认实际值。
 
 ## 超时行为
 

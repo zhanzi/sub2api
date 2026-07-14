@@ -748,8 +748,8 @@ type GatewayConfig struct {
 	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒），0表示无超时
 	// OpenAI/Codex 请求可能在上游排队较久；默认不使用通用响应头超时截断。
 	OpenAIResponseHeaderTimeout int `mapstructure:"openai_response_header_timeout"`
-	// OpenAIFirstOutputTimeout: OpenAI/Codex 收到响应头后等待首个有效输出的最长时间（秒），0表示禁用。
-	// response.created、response.in_progress、空行和 SSE 注释不算有效输出。
+	// OpenAIFirstOutputTimeout: OpenAI/Codex 从开始转发到首个有效输出的总超时时间（秒），0表示禁用。
+	// 等待响应头的时间计入总预算；response.created、response.in_progress、空行和 SSE 注释不算有效输出。
 	OpenAIFirstOutputTimeout int `mapstructure:"openai_first_output_timeout"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`

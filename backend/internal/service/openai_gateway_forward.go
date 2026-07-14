@@ -713,8 +713,23 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 		// Send request
 		upstreamStart := time.Now()
+		var firstOutputHeaderGuard *openAIFirstOutputHeaderGuard
+		if reqStream {
+			guardedCtx, guard := s.guardOpenAIFirstOutputHeaderWait(upstreamReq.Context(), startTime)
+			if guard != nil {
+				upstreamReq = upstreamReq.WithContext(guardedCtx)
+				firstOutputHeaderGuard = guard
+				defer firstOutputHeaderGuard.close()
+			}
+		}
 		resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
+		if firstOutputHeaderGuard != nil && firstOutputHeaderGuard.stopHeaderWait() {
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, s.handleOpenAIFirstOutputTimeout(c, account, false, "")
+		}
 		if err != nil {
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 			// a failover so the handler switches to a healthy account, and temporarily
