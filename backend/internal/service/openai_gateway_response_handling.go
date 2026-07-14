@@ -80,9 +80,9 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 
-	firstOutputTimeout := s.openAIFirstOutputTimeout()
+	firstOutputTimeout, firstOutputTimeoutEnabled := s.openAIFirstOutputRemaining(startTime)
 	var firstOutputTimer *time.Timer
-	if firstOutputTimeout > 0 {
+	if firstOutputTimeoutEnabled {
 		firstOutputTimer = time.NewTimer(firstOutputTimeout)
 		defer firstOutputTimer.Stop()
 	}

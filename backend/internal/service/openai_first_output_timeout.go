@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,11 +18,84 @@ const (
 	openAIMaxPendingPreambleBytes   = 1 << 20
 )
 
+var errOpenAIFirstOutputDeadline = errors.New(openAIFirstOutputTimeoutCode)
+
 func (s *OpenAIGatewayService) openAIFirstOutputTimeout() time.Duration {
 	if s == nil || s.cfg == nil || s.cfg.Gateway.OpenAIFirstOutputTimeout <= 0 {
 		return 0
 	}
 	return time.Duration(s.cfg.Gateway.OpenAIFirstOutputTimeout) * time.Second
+}
+
+func (s *OpenAIGatewayService) openAIFirstOutputRemaining(startTime time.Time) (time.Duration, bool) {
+	timeout := s.openAIFirstOutputTimeout()
+	if timeout <= 0 {
+		return 0, false
+	}
+	if startTime.IsZero() {
+		return timeout, true
+	}
+	remaining := time.Until(startTime.Add(timeout))
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, true
+}
+
+type openAIFirstOutputHeaderGuard struct {
+	cancel   context.CancelCauseFunc
+	timer    *time.Timer
+	timedOut chan struct{}
+}
+
+func (s *OpenAIGatewayService) guardOpenAIFirstOutputHeaderWait(
+	parent context.Context,
+	startTime time.Time,
+) (context.Context, *openAIFirstOutputHeaderGuard) {
+	remaining, enabled := s.openAIFirstOutputRemaining(startTime)
+	if !enabled {
+		return parent, nil
+	}
+
+	guardedCtx, cancel := context.WithCancelCause(parent)
+	guard := &openAIFirstOutputHeaderGuard{
+		cancel:   cancel,
+		timedOut: make(chan struct{}),
+	}
+	onTimeout := func() {
+		close(guard.timedOut)
+		cancel(errOpenAIFirstOutputDeadline)
+	}
+	if remaining <= 0 {
+		onTimeout()
+		return guardedCtx, guard
+	}
+	guard.timer = time.AfterFunc(remaining, onTimeout)
+	return guardedCtx, guard
+}
+
+func (g *openAIFirstOutputHeaderGuard) stopHeaderWait() bool {
+	if g == nil {
+		return false
+	}
+	if g.timer == nil {
+		return true
+	}
+	if g.timer.Stop() {
+		return false
+	}
+	<-g.timedOut
+	return true
+}
+
+func (g *openAIFirstOutputHeaderGuard) close() {
+	if g == nil {
+		return
+	}
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	g.cancel(nil)
 }
 
 func openAIStreamLineStopsFirstOutputTimer(line string) bool {

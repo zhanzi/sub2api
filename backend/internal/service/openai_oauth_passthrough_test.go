@@ -32,6 +32,7 @@ type httpUpstreamRecorder struct {
 	requests     []*http.Request
 	bodies       [][]byte
 
+	do        func(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error)
 	resp      *http.Response
 	responses []*http.Response
 	err       error
@@ -63,6 +64,9 @@ func (u *httpUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID 
 		req.Body = io.NopCloser(bytes.NewReader(b))
 	}
 	u.requests = append(u.requests, req)
+	if u.do != nil {
+		return u.do(req, proxyURL, accountID, accountConcurrency)
+	}
 	if u.err != nil {
 		return nil, u.err
 	}
@@ -76,6 +80,66 @@ func (u *httpUpstreamRecorder) Do(req *http.Request, proxyURL string, accountID 
 
 func (u *httpUpstreamRecorder) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func TestOpenAIGatewayService_FirstOutputTimeoutIncludesResponseHeaderWait(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough=%v", passthrough), func(t *testing.T) {
+			body := []byte(`{"model":"gpt-5.5","stream":true,"instructions":"test","input":"hello"}`)
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			upstream := &httpUpstreamRecorder{
+				do: func(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				},
+			}
+			svc := &OpenAIGatewayService{
+				cfg: &config.Config{
+					Gateway: config.GatewayConfig{OpenAIFirstOutputTimeout: 1},
+					Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{
+						Enabled:           false,
+						AllowInsecureHTTP: true,
+					}},
+				},
+				httpUpstream: upstream,
+			}
+			account := &Account{
+				ID:          123,
+				Name:        "acc",
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeAPIKey,
+				Concurrency: 1,
+				Credentials: map[string]any{
+					"api_key":  "sk-test",
+					"base_url": "http://upstream.example",
+				},
+				Extra: map[string]any{
+					openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeAuto),
+					openai_compat.ExtraKeyResponsesSupported: true,
+					"openai_passthrough":                     passthrough,
+				},
+				Status:      StatusActive,
+				Schedulable: true,
+			}
+
+			started := time.Now()
+			result, err := svc.Forward(context.Background(), c, account, body)
+
+			require.Error(t, err)
+			require.Nil(t, result)
+			require.Less(t, time.Since(started), 2*time.Second)
+			var failoverErr *UpstreamFailoverError
+			require.False(t, errors.As(err, &failoverErr))
+			require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+			require.Equal(t, openAIFirstOutputTimeoutCode, gjson.Get(rec.Body.String(), "error.code").String())
+		})
+	}
 }
 
 func TestOpenAIGatewayService_ResponsesUnknownModelDoesNotFallbackToGPT54(t *testing.T) {

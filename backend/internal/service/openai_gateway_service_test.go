@@ -1867,6 +1867,55 @@ func TestOpenAIStreamingFirstOutputTimeoutIgnoresPreambleAndKeepalive(t *testing
 	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
 }
 
+func TestOpenAIStreamingFirstOutputTimeoutUsesRemainingTotalBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			MaxLineSize:              defaultMaxLineSize,
+			OpenAIFirstOutputTimeout: 1,
+		},
+	}
+	svc := &OpenAIGatewayService{cfg: cfg}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+
+	pr, pw := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       pr,
+		Header:     http.Header{},
+	}
+	go func() {
+		defer func() { _ = pw.Close() }()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := io.WriteString(pw, "data: {\"type\":\"response.in_progress\"}\n\n"); err != nil {
+				return
+			}
+			<-ticker.C
+		}
+	}()
+
+	started := time.Now()
+	_, err := svc.handleStreamingResponse(
+		c.Request.Context(),
+		resp,
+		c,
+		&Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"},
+		time.Now().Add(-750*time.Millisecond),
+		"model",
+		"model",
+	)
+
+	require.Error(t, err)
+	require.Less(t, time.Since(started), 750*time.Millisecond)
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	require.Equal(t, openAIFirstOutputTimeoutCode, gjson.Get(rec.Body.String(), "error.code").String())
+}
+
 func TestOpenAIStreamLineStopsFirstOutputTimer(t *testing.T) {
 	tests := []struct {
 		name string
