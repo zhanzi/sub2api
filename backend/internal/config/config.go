@@ -748,6 +748,9 @@ type GatewayConfig struct {
 	// OpenAIResponseHeaderTimeout: OpenAI/Codex 上游等待响应头的超时时间（秒），0表示无超时
 	// OpenAI/Codex 请求可能在上游排队较久；默认不使用通用响应头超时截断。
 	OpenAIResponseHeaderTimeout int `mapstructure:"openai_response_header_timeout"`
+	// OpenAIFirstOutputTimeout: OpenAI/Codex 收到响应头后等待首个有效输出的最长时间（秒），0表示禁用。
+	// response.created、response.in_progress、空行和 SSE 注释不算有效输出。
+	OpenAIFirstOutputTimeout int `mapstructure:"openai_first_output_timeout"`
 	// 请求体最大字节数，用于网关请求体大小限制
 	MaxBodySize int64 `mapstructure:"max_body_size"`
 	// 非流式上游响应体读取上限（字节），用于防止无界读取导致内存放大
@@ -1944,6 +1947,7 @@ func setDefaults() {
 	// Gateway
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
+	viper.SetDefault("gateway.openai_first_output_timeout", 300)
 	viper.SetDefault("gateway.log_upstream_error_body", true)
 	viper.SetDefault("gateway.log_upstream_error_body_max_bytes", 2048)
 	viper.SetDefault("gateway.inject_beta_for_apikey", false)
@@ -2700,6 +2704,13 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.StreamDataIntervalTimeout < 0 {
 		return fmt.Errorf("gateway.stream_data_interval_timeout must be non-negative")
+	}
+	if c.Gateway.OpenAIFirstOutputTimeout < 0 {
+		return fmt.Errorf("gateway.openai_first_output_timeout must be non-negative")
+	}
+	if c.Gateway.OpenAIFirstOutputTimeout != 0 &&
+		(c.Gateway.OpenAIFirstOutputTimeout < 30 || c.Gateway.OpenAIFirstOutputTimeout > 1800) {
+		return fmt.Errorf("gateway.openai_first_output_timeout must be 0 or between 30-1800 seconds")
 	}
 	if c.Gateway.StreamDataIntervalTimeout != 0 &&
 		(c.Gateway.StreamDataIntervalTimeout < 30 || c.Gateway.StreamDataIntervalTimeout > 300) {

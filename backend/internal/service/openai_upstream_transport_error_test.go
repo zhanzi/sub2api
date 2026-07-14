@@ -84,6 +84,21 @@ func TestClassifyOpenAITransportError(t *testing.T) {
 	}
 }
 
+func TestOpenAIUpstreamTimeoutResultUnknown(t *testing.T) {
+	requireUnknown := func(t *testing.T, err error, want bool) {
+		t.Helper()
+		if got := openAIUpstreamTimeoutResultUnknown(err); got != want {
+			t.Fatalf("openAIUpstreamTimeoutResultUnknown(%q) = %v, want %v", errString(err), got, want)
+		}
+	}
+
+	requireUnknown(t, context.DeadlineExceeded, true)
+	requireUnknown(t, errors.New("net/http: timeout awaiting response headers"), true)
+	requireUnknown(t, errors.New("Client.Timeout exceeded while awaiting headers"), true)
+	requireUnknown(t, errors.New("dial tcp 1.2.3.4:443: i/o timeout"), false)
+	requireUnknown(t, errors.New("unexpected EOF"), false)
+}
+
 func errString(err error) string {
 	if err == nil {
 		return "<nil>"

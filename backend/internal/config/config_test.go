@@ -259,6 +259,51 @@ func TestLoadOpenAIResponseHeaderTimeoutFromEnv(t *testing.T) {
 	require.Equal(t, 1800, cfg.Gateway.OpenAIResponseHeaderTimeout)
 }
 
+func TestLoadDefaultOpenAIFirstOutputTimeout(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 300, cfg.Gateway.OpenAIFirstOutputTimeout)
+}
+
+func TestLoadOpenAIFirstOutputTimeoutFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_FIRST_OUTPUT_TIMEOUT", "60")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 60, cfg.Gateway.OpenAIFirstOutputTimeout)
+}
+
+func TestLoadRejectsInvalidOpenAIFirstOutputTimeout(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_FIRST_OUTPUT_TIMEOUT", "29")
+
+	_, err := Load()
+	require.ErrorContains(t, err, "gateway.openai_first_output_timeout must be 0 or between 30-1800 seconds")
+}
+
+func TestLoadAcceptsOpenAIFirstOutputTimeoutBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{env: "0", want: 0},
+		{env: "30", want: 30},
+		{env: "1800", want: 1800},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			t.Setenv("GATEWAY_OPENAI_FIRST_OUTPUT_TIMEOUT", tc.env)
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, cfg.Gateway.OpenAIFirstOutputTimeout)
+		})
+	}
+}
+
 func TestLoadImageNonstreamKeepaliveFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_IMAGE_NONSTREAM_KEEPALIVE_INTERVAL", "15")
