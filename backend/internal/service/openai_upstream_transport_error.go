@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -48,35 +47,6 @@ var openAIPersistentTransportErrorMarkers = []string{
 	"no route to host",
 	"network is unreachable",
 	"no such host", // DNS resolution failure (bad/expired proxy hostname)
-}
-
-func openAIUpstreamTimeoutResultUnknown(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "timeout awaiting response headers") ||
-		strings.Contains(msg, "timeout exceeded while awaiting headers")
-}
-
-func isOpenAIResponsesRequest(c *gin.Context) bool {
-	if c == nil || c.Request == nil || c.Request.URL == nil {
-		return false
-	}
-	path := strings.TrimSuffix(strings.TrimSpace(c.Request.URL.Path), "/")
-	for _, marker := range []string{
-		"/v1/responses",
-		"/responses",
-		"/backend-api/codex/responses",
-	} {
-		if strings.HasSuffix(path, marker) || strings.Contains(path, marker+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // classifyOpenAITransportError decides whether a transport-level upstream error
@@ -137,21 +107,14 @@ func classifyOpenAITransportError(err error) openAITransportErrorClass {
 // passthrough tags the Ops error event for the OpenAI passthrough forward path.
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool) error {
 	safeErr := sanitizeUpstreamErrorMessage(err.Error())
-	resultUnknownTimeout := isOpenAIResponsesRequest(c) && openAIUpstreamTimeoutResultUnknown(err)
-	upstreamStatus := 0
-	kind := "request_error"
-	if resultUnknownTimeout {
-		upstreamStatus = http.StatusGatewayTimeout
-		kind = "timeout"
-	}
-	setOpsUpstreamError(c, upstreamStatus, safeErr, "")
+	setOpsUpstreamError(c, 0, safeErr, "")
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:           account.Platform,
 		AccountID:          account.ID,
 		AccountName:        account.Name,
-		UpstreamStatusCode: upstreamStatus,
+		UpstreamStatusCode: 0,
 		Passthrough:        passthrough,
-		Kind:               kind,
+		Kind:               "request_error",
 		Message:            safeErr,
 	})
 
@@ -159,15 +122,6 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	// this one — the upstream never had a chance to exhibit a fault.
 	if errors.Is(err, context.Canceled) {
 		return err
-	}
-
-	// Once a request may have reached the upstream, a timeout leaves its billing
-	// and side effects unknown. Return 504 directly instead of replaying it on a
-	// different account.
-	if resultUnknownTimeout {
-		message := "OpenAI upstream timed out before returning response headers"
-		writeOpenAITimeoutResponse(c, openAIResponseHeaderTimeoutCode, message)
-		return fmt.Errorf("%s: %w", openAIResponseHeaderTimeoutCode, err)
 	}
 
 	if classifyOpenAITransportError(err).Persistent {

@@ -87,8 +87,7 @@ func TestHandleOpenAIUpstreamTransportError_PersistentEvictsAndFailsOver(t *test
 	require.Equal(t, 0, rec.Body.Len())
 }
 
-// A transport timeout before connecting is safe to fail over and must NOT
-// evict the account.
+// A transient blip should fail over but must NOT evict the account.
 func TestHandleOpenAIUpstreamTransportError_TransientFailsOverWithoutEviction(t *testing.T) {
 	repo := &openaiTransportAccountRepoStub{}
 	svc := &OpenAIGatewayService{accountRepo: repo}
@@ -96,7 +95,7 @@ func TestHandleOpenAIUpstreamTransportError_TransientFailsOverWithoutEviction(t 
 	c, rec := newOpenAITransportErrTestContext()
 
 	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
-		errors.New(`dial tcp 1.2.3.4:443: i/o timeout`), false)
+		errors.New(`Post "https://chatgpt.com/...": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`), false)
 
 	var fo *UpstreamFailoverError
 	require.True(t, errors.As(err, &fo), "transient error must return *UpstreamFailoverError")
@@ -106,64 +105,6 @@ func TestHandleOpenAIUpstreamTransportError_TransientFailsOverWithoutEviction(t 
 	require.Empty(t, repo.tempUnschedCalls)
 	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 	require.Equal(t, 0, rec.Body.Len())
-}
-
-func TestHandleOpenAIUpstreamTransportError_ResponseHeaderTimeoutDoesNotFailOver(t *testing.T) {
-	repo := &openaiTransportAccountRepoStub{}
-	svc := &OpenAIGatewayService{accountRepo: repo}
-	account := &Account{ID: 100, Name: "unknown-result", Platform: PlatformOpenAI}
-	c, rec := newOpenAITransportErrTestContext()
-
-	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
-		errors.New(`Post "https://chatgpt.com/...": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`), false)
-
-	var fo *UpstreamFailoverError
-	require.False(t, errors.As(err, &fo), "response-header timeout must not replay on another account")
-	require.True(t, IsResponseCommitted(c))
-	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
-	require.Contains(t, rec.Body.String(), openAIResponseHeaderTimeoutCode)
-	require.Empty(t, repo.tempUnschedCalls)
-}
-
-func TestHandleOpenAIUpstreamTransportError_ResponseHeaderTimeoutOutsideResponsesStillFailsOver(t *testing.T) {
-	repo := &openaiTransportAccountRepoStub{}
-	svc := &OpenAIGatewayService{accountRepo: repo}
-	account := &Account{ID: 101, Name: "chat-timeout", Platform: PlatformOpenAI}
-	c, rec := newOpenAITransportErrTestContext()
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-
-	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
-		errors.New(`Post "https://chatgpt.com/...": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`), false)
-
-	var fo *UpstreamFailoverError
-	require.True(t, errors.As(err, &fo), "non-Responses endpoints keep the existing failover behavior")
-	require.False(t, IsResponseCommitted(c))
-	require.Empty(t, rec.Body.String())
-}
-
-func TestIsOpenAIResponsesRequestRecognizesAliasesAndCompact(t *testing.T) {
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{path: "/v1/responses", want: true},
-		{path: "/openai/v1/responses", want: true},
-		{path: "/v1/responses/compact", want: true},
-		{path: "/responses", want: true},
-		{path: "/responses/compact", want: true},
-		{path: "/backend-api/codex/responses", want: true},
-		{path: "/backend-api/codex/responses/compact", want: true},
-		{path: "/v1/chat/completions", want: false},
-		{path: "/v1/responses-other", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			c, _ := newOpenAITransportErrTestContext()
-			c.Request = httptest.NewRequest(http.MethodPost, tt.path, nil)
-			require.Equal(t, tt.want, isOpenAIResponsesRequest(c))
-		})
-	}
 }
 
 // context.Canceled means the client disconnected — do NOT fail over to another
@@ -222,22 +163,18 @@ func TestTempUnscheduleOpenAITransportError_NilAccountRepo_InMemoryBlockOnly(t *
 		"in-memory block must apply even when accountRepo is nil")
 }
 
-// A Responses deadline after dispatch leaves the upstream result unknown, so it
-// must return 504 without replaying the request.
-func TestHandleOpenAIUpstreamTransportError_DeadlineExceededDoesNotFailOver(t *testing.T) {
+// context.DeadlineExceeded is NOT special-cased — a slow upstream is worth failing over.
+func TestHandleOpenAIUpstreamTransportError_DeadlineExceeded_StillFailsOver(t *testing.T) {
 	repo := &openaiTransportAccountRepoStub{}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	account := &Account{ID: 79, Name: "slow", Platform: PlatformOpenAI}
-	c, rec := newOpenAITransportErrTestContext()
+	c, _ := newOpenAITransportErrTestContext()
 
 	err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account,
 		context.DeadlineExceeded, false)
 
 	var fo *UpstreamFailoverError
-	require.False(t, errors.As(err, &fo), "context.DeadlineExceeded must not return *UpstreamFailoverError")
-	require.True(t, IsResponseCommitted(c))
-	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
-	require.Contains(t, rec.Body.String(), openAIResponseHeaderTimeoutCode)
+	require.True(t, errors.As(err, &fo), "context.DeadlineExceeded must still return *UpstreamFailoverError")
 }
 
 func TestForwardAsRawChatCompletions_TransportErrorFailsOver(t *testing.T) {
